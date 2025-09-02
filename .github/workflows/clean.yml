@@ -17,39 +17,58 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Install deps
+      - name: Install dependencies
         run: pip install pyyaml requests
 
-      - name: Fetch BPB subscription
-        run: |
-          curl -sSL "${{ secrets.BPB_SUB_URL }}" -o raw_bpb.json
-
-      - name: Clean nodes
+      - name: Clean BPB Clash subscription
+        env:
+          BPB_SUB_URL: ${{ secrets.BPB_SUB_URL }}
         run: |
           python3 <<'PYCODE'
-          import json, yaml
+          import os
+          import requests
+          import yaml
 
-          with open("raw_bpb.json", "r", encoding="utf-8") as f:
-              nodes = json.load(f)
+          BPB_SUB_URL = os.environ.get("BPB_SUB_URL")
+          if not BPB_SUB_URL:
+              raise ValueError("请设置环境变量 BPB_SUB_URL")
 
+          # 拉取 BPB Clash 订阅
+          resp = requests.get(BPB_SUB_URL, timeout=10)
+          resp.raise_for_status()
+          raw_yaml = resp.text
+
+          # 解析 YAML
+          nodes = yaml.safe_load(raw_yaml)
+
+          # 清洗函数
           def clean_node(node):
               for key in ["packet-encoding", "ip-version", "tfo", "mptcp"]:
                   node.pop(key, None)
-              if "servername" in node and node["servername"]:
-                  node["servername"] = node["servername"].lower()
               if node.get("client-fingerprint") in ["random", "randomized"]:
                   node["client-fingerprint"] = "chrome"
+              if "servername" in node and node["servername"]:
+                  node["servername"] = node["servername"].lower()
               node["cipher"] = "none"
               node["udp"] = True
               return node
 
-          cleaned = [clean_node(n) for n in nodes if n.get("type") == "vless"]
+          # 遍历节点清洗
+          cleaned = []
+          for node in nodes:
+              if node.get("type") == "vless":
+                  cleaned.append(clean_node(node))
+              else:
+                  cleaned.append(node)  # 其他类型节点保留
 
+          # 输出 YAML
           with open("BPB.yaml", "w", encoding="utf-8") as f:
               yaml.dump(cleaned, f, allow_unicode=True, sort_keys=False)
+
+          print(f"✅ 清洗完成，生成 BPB.yaml，共 {len(cleaned)} 个节点")
           PYCODE
 
-      - name: Upload to Gist
+      - name: Push BPB.yaml to Gist
         uses: exuanbo/actions-deploy-gist@v1
         with:
           token: ${{ secrets.GIST_TOKEN }}
