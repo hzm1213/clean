@@ -2,7 +2,7 @@ name: Clean BPB Clash
 
 on:
   schedule:
-    - cron: "0 */6 * * *"   # 每6小时跑一次
+    - cron: "0 */6 * * *"   # 每6小时运行一次
   workflow_dispatch:         # 手动触发
 
 jobs:
@@ -39,31 +39,44 @@ jobs:
           raw_yaml = resp.text
 
           # 解析 YAML
-          nodes = yaml.safe_load(raw_yaml)
+          data = yaml.safe_load(raw_yaml)
+
+          # Clash YAML 节点通常在 proxies 字段
+          nodes = data.get("proxies", [])
+          if not nodes:
+              raise ValueError("解析到的 proxies 列表为空，请检查订阅链接")
 
           # 清洗函数
           def clean_node(node):
+              # 删除 Clash 不支持字段
               for key in ["packet-encoding", "ip-version", "tfo", "mptcp"]:
                   node.pop(key, None)
+              # 修正 fingerprint
               if node.get("client-fingerprint") in ["random", "randomized"]:
                   node["client-fingerprint"] = "chrome"
+              # servername 小写
               if "servername" in node and node["servername"]:
                   node["servername"] = node["servername"].lower()
+              # cipher
               node["cipher"] = "none"
+              # udp
               node["udp"] = True
               return node
 
-          # 遍历节点清洗
+          # 遍历清洗所有节点
           cleaned = []
           for node in nodes:
-              if node.get("type") == "vless":
+              if isinstance(node, dict):
                   cleaned.append(clean_node(node))
               else:
-                  cleaned.append(node)  # 其他类型节点保留
+                  cleaned.append(node)  # 其他格式节点直接保留
 
-          # 输出 YAML
+          # 更新 proxies
+          data["proxies"] = cleaned
+
+          # 输出到 BPB.yaml
           with open("BPB.yaml", "w", encoding="utf-8") as f:
-              yaml.dump(cleaned, f, allow_unicode=True, sort_keys=False)
+              yaml.dump(data, f, allow_unicode=True, sort_keys=False)
 
           print(f"✅ 清洗完成，生成 BPB.yaml，共 {len(cleaned)} 个节点")
           PYCODE
