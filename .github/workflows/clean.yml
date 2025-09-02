@@ -1,0 +1,57 @@
+name: Clean BPB Clash
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # 每6小时跑一次
+  workflow_dispatch:         # 手动触发
+
+jobs:
+  clean-bpb:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install deps
+        run: pip install pyyaml requests
+
+      - name: Fetch BPB subscription
+        run: |
+          curl -sSL "${{ secrets.BPB_SUB_URL }}" -o raw_bpb.json
+
+      - name: Clean nodes
+        run: |
+          python3 <<'PYCODE'
+          import json, yaml
+
+          with open("raw_bpb.json", "r", encoding="utf-8") as f:
+              nodes = json.load(f)
+
+          def clean_node(node):
+              for key in ["packet-encoding", "ip-version", "tfo", "mptcp"]:
+                  node.pop(key, None)
+              if "servername" in node and node["servername"]:
+                  node["servername"] = node["servername"].lower()
+              if node.get("client-fingerprint") in ["random", "randomized"]:
+                  node["client-fingerprint"] = "chrome"
+              node["cipher"] = "none"
+              node["udp"] = True
+              return node
+
+          cleaned = [clean_node(n) for n in nodes if n.get("type") == "vless"]
+
+          with open("BPB.yaml", "w", encoding="utf-8") as f:
+              yaml.dump(cleaned, f, allow_unicode=True, sort_keys=False)
+          PYCODE
+
+      - name: Upload to Gist
+        uses: exuanbo/actions-deploy-gist@v1
+        with:
+          token: ${{ secrets.GIST_TOKEN }}
+          gist_id: ${{ secrets.GIST_ID }}
+          file_path: BPB.yaml
