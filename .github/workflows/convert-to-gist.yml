@@ -30,14 +30,13 @@ jobs:
           jq -c '.[]' raw.json | while read -r item; do
             remarks=$(echo "$item" | jq -r '.remarks')
             
-            # 找出 outbounds 里的 tag = "proxy"
+            # 找 tag="proxy" 的出站
             outbound=$(echo "$item" | jq -c '.outbounds[] | select(.tag=="proxy")')
 
             proto=$(echo "$outbound" | jq -r '.protocol')
             server=$(echo "$outbound" | jq -r '.settings.address')
             port=$(echo "$outbound" | jq -r '.settings.port')
             uuid=$(echo "$outbound" | jq -r '.settings.id')
-            encryption=$(echo "$outbound" | jq -r '.settings.encryption')
 
             network=$(echo "$outbound" | jq -r '.streamSettings.network')
 
@@ -46,7 +45,6 @@ jobs:
             tls=$(echo "$outbound" | jq -r '.streamSettings.security')
             sni=$(echo "$outbound" | jq -r '.streamSettings.tlsSettings.serverName // empty')
 
-            # 构造 URL
             url="vless://${uuid}@${server}:${port}?type=${network}&path=${path}"
 
             [ -n "$host" ] && url="${url}&host=${host}"
@@ -68,7 +66,7 @@ jobs:
             const fs = require('fs');
             const content = fs.readFileSync('final.txt', 'utf8');
 
-            await github.gists.update({
+            await github.rest.gists.update({
               gist_id: process.env.GIST_ID,
               files: {
                 "converted_base64.txt": {
