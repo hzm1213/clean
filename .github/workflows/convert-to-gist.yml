@@ -1,80 +1,63 @@
-name: Convert JSON to VLESS and push to Gist
+name: Convert Subscription to Gist
 
 on:
   schedule:
-    - cron: "0 */6 * * *" # 每6小时
+    - cron: "0 */6 * * *"   # 每6小时执行一次
   workflow_dispatch:
 
 jobs:
-  run:
+  update:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Install jq
-      run: sudo apt-get install -y jq
+      - name: Install curl & jq & xxd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq xxd
 
-    - name: Fetch JSON using Secrets
-      run: |
-        curl -L "$SUB_URL" -o data.json
-      env:
-        SUB_URL: ${{ secrets.SUB_URL }}
+      - name: Download subscription (from secret)
+        run: |
+          curl -L "${{ secrets.SUB_URL }}" -o raw.txt
 
-    - name: Parse JSON and generate URL list
-      run: |
-        mkdir output
-        > output/url.txt
+      - name: Decode base64 to raw nodes
+        run: |
+          decoded=$(cat raw.txt | base64 -d 2>/dev/null || true)
+          if [ -z "$decoded" ]; then
+            echo "❌ 解码失败，源文件不是 base64？" >&2
+            exit 1
+          fi
+          echo "$decoded" > decoded.txt
 
-        count=$(jq length data.json)
+      - name: Normalize each line to URL form
+        run: |
+          : > urls.txt
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
 
-        for i in $(seq 0 $(( $count - 1 ))); do
-          
-          uuid=$(jq -r ".[$i].outbounds[0].settings.id" data.json)
-          host=$(jq -r ".[$i].outbounds[0].settings.address" data.json)
-          port=$(jq -r ".[$i].outbounds[0].settings.port" data.json)
-          ws_host=$(jq -r ".[$i].outbounds[0].streamSettings.wsSettings.host" data.json)
-          ws_path=$(jq -r ".[$i].outbounds[0].streamSettings.wsSettings.path" data.json)
-          sni=$(jq -r ".[$i].outbounds[0].streamSettings.tlsSettings.serverName" data.json)
-          remark=$(jq -r ".[$i].remarks" data.json)
+            if echo "$line" | grep -qE "^(ss|vmess|vless|trojan)://"; then
+              echo "$line" >> urls.txt
+            else
+              :
+            fi
 
-          ws_path_enc=$(python3 - <<EOF
-import urllib.parse
-print(urllib.parse.quote("'''$ws_path'''"))
-EOF
-)
+          done < decoded.txt
 
-          echo "vless://$uuid@$host:$port?type=ws&host=$ws_host&path=$ws_path_enc&security=tls&sni=$sni#$remark" >> output/url.txt
-        done
+      - name: Convert URL list to base64 subscription
+        run: |
+          base64 urls.txt | tr -d '\n' > final.txt
 
-    - name: Generate Base64 subscription
-      run: |
-        base64 -w 0 output/url.txt > output/sub.txt
+      - name: Upload to Gist
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GIST_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const content = fs.readFileSync('final.txt', 'utf8');
 
-    - name: Push to Gist
-      run: |
-        CONTENT=$(jq -Rs '.' output/sub.txt)
-        URLCONTENT=$(jq -Rs '.' output/url.txt)
-
-        cat <<EOF > gist.json
-{
-  "files": {
-    "sub.txt": {
-      "content": $CONTENT
-    },
-    "url.txt": {
-      "content": $URLCONTENT
-    }
-  }
-}
-EOF
-
-        curl -X PATCH \
-          -H "Authorization: token $TOKEN" \
-          -H "Content-Type: application/json" \
-          -d @gist.json \
-          "https://api.github.com/gists/$GIST_ID"
-      env:
-        TOKEN: ${{ secrets.GIST_TOKEN }}
-        GIST_ID: ${{ secrets.GIST_ID }}
+            await github.gists.update({
+              gist_id: process.env.GIST_ID,
+              files: {
+                "conv
