@@ -1,8 +1,8 @@
-name: Convert Subscription to Gist
+name: Convert JSON Subscription to Gist
 
 on:
   schedule:
-    - cron: "0 */6 * * *"   # 每6小时执行一次
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 jobs:
@@ -13,39 +13,50 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install curl & jq & xxd
+      - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq xxd
+          sudo apt-get install -y jq
 
       - name: Download subscription (from secret)
         run: |
-          curl -L "${{ secrets.SUB_URL }}" -o raw.txt
+          curl -L "${{ secrets.SUB_URL }}" -o raw.json
+          echo "Downloaded raw.json:"
+          head -n 5 raw.json
 
-      - name: Decode base64 to raw nodes
-        run: |
-          decoded=$(cat raw.txt | base64 -d 2>/dev/null || true)
-          if [ -z "$decoded" ]; then
-            echo "❌ 解码失败，源文件不是 base64？" >&2
-            exit 1
-          fi
-          echo "$decoded" > decoded.txt
-
-      - name: Normalize each line to URL form
+      - name: Extract VLESS nodes from JSON → URL
         run: |
           : > urls.txt
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
+          jq -c '.[]' raw.json | while read -r item; do
+            remarks=$(echo "$item" | jq -r '.remarks')
+            
+            # 找出 outbounds 里的 tag = "proxy"
+            outbound=$(echo "$item" | jq -c '.outbounds[] | select(.tag=="proxy")')
 
-            if echo "$line" | grep -qE "^(ss|vmess|vless|trojan)://"; then
-              echo "$line" >> urls.txt
-            else
-              :
-            fi
+            proto=$(echo "$outbound" | jq -r '.protocol')
+            server=$(echo "$outbound" | jq -r '.settings.address')
+            port=$(echo "$outbound" | jq -r '.settings.port')
+            uuid=$(echo "$outbound" | jq -r '.settings.id')
+            encryption=$(echo "$outbound" | jq -r '.settings.encryption')
 
-          done < decoded.txt
+            network=$(echo "$outbound" | jq -r '.streamSettings.network')
 
-      - name: Convert URL list to base64 subscription
+            host=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.host // empty')
+            path=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.path // "/"')
+            tls=$(echo "$outbound" | jq -r '.streamSettings.security')
+            sni=$(echo "$outbound" | jq -r '.streamSettings.tlsSettings.serverName // empty')
+
+            # 构造 URL
+            url="vless://${uuid}@${server}:${port}?type=${network}&path=${path}"
+
+            [ -n "$host" ] && url="${url}&host=${host}"
+            [ "$tls" = "tls" ] && url="${url}&security=tls"
+            [ -n "$sni" ] && url="${url}&sni=${sni}"
+
+            echo "${url}#${remarks}" >> urls.txt
+          done
+
+      - name: Convert to Base64 subscription
         run: |
           base64 urls.txt | tr -d '\n' > final.txt
 
@@ -60,4 +71,11 @@ jobs:
             await github.gists.update({
               gist_id: process.env.GIST_ID,
               files: {
-                "conv
+                "converted_base64.txt": {
+                  content: content
+                }
+              }
+            });
+
+        env:
+          GIST_ID: ${{ secrets.GIST_ID }}
