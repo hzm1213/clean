@@ -2,7 +2,7 @@ name: Convert JSON Subscription to Gist
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 */6 * * *"  # 每6小时运行一次
   workflow_dispatch:
 
 jobs:
@@ -30,7 +30,6 @@ jobs:
           jq -c '.[]' raw.json | while read -r item; do
             remarks=$(echo "$item" | jq -r '.remarks')
             
-            # 找 tag="proxy" 的出站
             outbound=$(echo "$item" | jq -c '.outbounds[] | select(.tag=="proxy")')
 
             proto=$(echo "$outbound" | jq -r '.protocol')
@@ -69,11 +68,13 @@ jobs:
             await github.rest.gists.update({
               gist_id: process.env.GIST_ID,
               files: {
-                "converted_base64.txt": {
-                  content: content
-                }
+                "converted_base64.txt": { content: content }
               }
             });
-
         env:
           GIST_ID: ${{ secrets.GIST_ID }}
+
+      - name: Show Gist URL in Logs
+        run: |
+          echo "✅ Gist Page URL: https://gist.github.com/${{ github.actor }}/${{ secrets.GIST_ID }}"
+          echo "✅ Gist Raw URL: https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/converted_base64.txt"
