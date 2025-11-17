@@ -1,0 +1,80 @@
+name: Convert JSON to VLESS and push to Gist
+
+on:
+  schedule:
+    - cron: "0 */6 * * *" # 每6小时
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Install jq
+      run: sudo apt-get install -y jq
+
+    - name: Fetch JSON using Secrets
+      run: |
+        curl -L "$SUB_URL" -o data.json
+      env:
+        SUB_URL: ${{ secrets.SUB_URL }}
+
+    - name: Parse JSON and generate URL list
+      run: |
+        mkdir output
+        > output/url.txt
+
+        count=$(jq length data.json)
+
+        for i in $(seq 0 $(( $count - 1 ))); do
+          
+          uuid=$(jq -r ".[$i].outbounds[0].settings.id" data.json)
+          host=$(jq -r ".[$i].outbounds[0].settings.address" data.json)
+          port=$(jq -r ".[$i].outbounds[0].settings.port" data.json)
+          ws_host=$(jq -r ".[$i].outbounds[0].streamSettings.wsSettings.host" data.json)
+          ws_path=$(jq -r ".[$i].outbounds[0].streamSettings.wsSettings.path" data.json)
+          sni=$(jq -r ".[$i].outbounds[0].streamSettings.tlsSettings.serverName" data.json)
+          remark=$(jq -r ".[$i].remarks" data.json)
+
+          ws_path_enc=$(python3 - <<EOF
+import urllib.parse
+print(urllib.parse.quote("'''$ws_path'''"))
+EOF
+)
+
+          echo "vless://$uuid@$host:$port?type=ws&host=$ws_host&path=$ws_path_enc&security=tls&sni=$sni#$remark" >> output/url.txt
+        done
+
+    - name: Generate Base64 subscription
+      run: |
+        base64 -w 0 output/url.txt > output/sub.txt
+
+    - name: Push to Gist
+      run: |
+        CONTENT=$(jq -Rs '.' output/sub.txt)
+        URLCONTENT=$(jq -Rs '.' output/url.txt)
+
+        cat <<EOF > gist.json
+{
+  "files": {
+    "sub.txt": {
+      "content": $CONTENT
+    },
+    "url.txt": {
+      "content": $URLCONTENT
+    }
+  }
+}
+EOF
+
+        curl -X PATCH \
+          -H "Authorization: token $TOKEN" \
+          -H "Content-Type: application/json" \
+          -d @gist.json \
+          "https://api.github.com/gists/$GIST_ID"
+      env:
+        TOKEN: ${{ secrets.GIST_TOKEN }}
+        GIST_ID: ${{ secrets.GIST_ID }}
