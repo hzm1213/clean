@@ -1,4 +1,4 @@
-name: Convert JSON Subscription to Gist
+name: Convert JSON to Gist
 
 on:
   schedule:
@@ -6,14 +6,14 @@ on:
   workflow_dispatch:
 
 jobs:
-  update:
+  run:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq python3
@@ -21,103 +21,119 @@ jobs:
       - name: Download subscription
         run: |
           curl -sL "${{ secrets.SUB_URL }}" -o raw.json
-          echo "Preview raw.json:"
           head -n 20 raw.json
 
-      - name: Build URL list (auto-detect vless/trojan/vmess/ss)
+      - name: Extract nodes
         run: |
-          set -e
-          : > urls.txt
+          echo "" > urls.txt
 
-          urlencode() {
-            python3 - <<PY "$1"
-import urllib.parse, sys
-print(urllib.parse.quote(sys.argv[1], safe=''))
-PY
-          }
+          python3 <<'EOF'
+import json, base64, urllib.parse
 
-          jq -c '.[]' raw.json | while read -r item; do
-            remarks=$(echo "$item" | jq -r '.remarks // empty')
-            remark_enc=$(urlencode "$remarks")
+def enc(x):
+    return urllib.parse.quote(x or "")
 
-            echo "$item" | jq -c '.outbounds[]? | select(.tag=="proxy")' | while read -r ob; do
-              proto=$(echo "$ob" | jq -r '.protocol // empty')
-              host=$(echo "$ob" | jq -r '.settings.address // empty')
-              port=$(echo "$ob" | jq -r '.settings.port // empty')
-              network=$(echo "$ob" | jq -r '.streamSettings.network // "tcp"')
-              tls=$(echo "$ob" | jq -r '.streamSettings.security // empty')
-              sni=$(echo "$ob" | jq -r '.streamSettings.tlsSettings.serverName // empty')
-              ws_host=$(echo "$ob" | jq -r '.streamSettings.wsSettings.host // empty')
-              ws_path=$(echo "$ob" | jq -r '.streamSettings.wsSettings.path // "/"')
+data = json.load(open("raw.json"))
+out = []
 
-              case "$proto" in
-                vless)
-                  uuid=$(echo "$ob" | jq -r '.settings.id')
-                  url="vless://${uuid}@${host}:${port}?type=${network}&path=$(urlencode "$ws_path")"
-                  [ -n "$ws_host" ] && url="${url}&host=$(urlencode "$ws_host")"
-                  [ "$tls" = "tls" ] && url="${url}&security=tls"
-                  [ -n "$sni" ] && url="${url}&sni=$(urlencode "$sni")"
-                  echo "${url}#${remark_enc}" >> urls.txt
-                ;;
+for item in data:
+    remarks = item.get("remarks","")
+    for ob in item.get("outbounds",[]):
+        if ob.get("tag")!="proxy":
+            continue
+        
+        proto = ob.get("protocol")
+        host = ob["settings"].get("address","")
+        port = ob["settings"].get("port","")
+        net  = ob.get("streamSettings",{}).get("network","tcp")
+        tls  = ob.get("streamSettings",{}).get("security","")
+        sni  = ob.get("streamSettings",{}).get("tlsSettings",{}).get("serverName","")
+        ws   = ob.get("streamSettings",{}).get("wsSettings",{})
+        ws_host = ws.get("host","")
+        ws_path = ws.get("path","/")
 
-                trojan)
-                  pass=$(echo "$ob" | jq -r '.settings.password // .settings.pass // empty')
-                  url="trojan://${pass}@${host}:${port}"
-                  params=""
-                  [ "$tls" = "tls" ] && params="security=tls"
-                  [ -n "$sni" ] && params="${params}${params:+&}sni=$(urlencode "$sni")"
-                  [ -n "$params" ] && url="${url}?${params}"
-                  echo "${url}#${remark_enc}" >> urls.txt
-                ;;
+        # ------- vless -------
+        if proto=="vless":
+            uuid = ob["settings"].get("id","")
+            q = f"type={net}&path={enc(ws_path)}"
+            if ws_host:
+                q += f"&host={enc(ws_host)}"
+            if tls=="tls":
+                q += "&security=tls"
+            if sni:
+                q += f"&sni={enc(sni)}"
+            out.append(f"vless://{uuid}@{host}:{port}?{q}#{enc(remarks)}")
 
-                vmess)
-                  vmjson=$(echo "$ob" | jq -c '{v:"2",ps:env.REM,add:.settings.address,port:(.settings.port|tostring),id:.settings.id,aid:"0",net:.streamSettings.network,type:"none",host:.streamSettings.wsSettings.host,path:.streamSettings.wsSettings.path,tls:.streamSettings.security}' --arg REM "$remarks")
-                  b64=$(echo -n "$vmjson" | base64 -w 0)
-                  echo "vmess://${b64}#${remark_enc}" >> urls.txt
-                ;;
+        # ------- trojan -------
+        elif proto=="trojan":
+            pw = ob["settings"].get("password","")
+            q = []
+            if tls=="tls":
+                q.append("security=tls")
+            if sni:
+                q.append(f"sni={enc(sni)}")
+            qs = "&".join(q)
+            url = f"trojan://{pw}@{host}:{port}"
+            if qs:
+                url += f"?{qs}"
+            out.append(f"{url}#{enc(remarks)}")
 
-                ss)
-                  method=$(echo "$ob" | jq -r '.settings.method')
-                  passwd=$(echo "$ob" | jq -r '.settings.password')
-                  auth=$(printf "%s:%s" "$method" "$passwd" | base64 -w 0)
-                  echo "ss://${auth}@${host}:${port}#${remark_enc}" >> urls.txt
-                ;;
+        # ------- vmess -------
+        elif proto=="vmess":
+            body = {
+                "v":"2",
+                "ps":remarks,
+                "add":host,
+                "port":str(port),
+                "id":ob["settings"].get("id",""),
+                "aid":"0",
+                "net":net,
+                "type":"none",
+                "host":ws_host,
+                "path":ws_path,
+                "tls":tls
+            }
+            raw = json.dumps(body, separators=(",",":"))
+            b64 = base64.b64encode(raw.encode()).decode()
+            out.append(f"vmess://{b64}#{enc(remarks)}")
 
-              esac
-            done
-          done
+        # ------- ss -------
+        elif proto=="ss":
+            method = ob["settings"].get("method","")
+            passwd = ob["settings"].get("password","")
+            auth = base64.b64encode(f"{method}:{passwd}".encode()).decode()
+            out.append(f"ss://{auth}@{host}:{port}#{enc(remarks)}")
 
-      - name: Sort + dedupe URL list
+# 去重 & 排序
+out = sorted(set(out))
+open("urls.txt","w").write("\n".join(out))
+EOF
+
+      - name: Encode to base64
         run: |
-          grep -v '^$' urls.txt | sort -u > urls.clean
-          mv urls.clean urls.txt
-          echo "Total lines: $(wc -l < urls.txt)"
+          base64 -w 0 urls.txt > sub.txt
 
-      - name: Encode to Base64 subscription
-        run: |
-          base64 -w 0 urls.txt > final.txt
-
-      - name: Upload to Gist
+      - name: Update Gist
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GIST_TOKEN }}
           script: |
             const fs = require("fs");
-            const base64 = fs.readFileSync("final.txt", "utf8");
-            const urls = fs.readFileSync("urls.txt", "utf8");
+            const b64 = fs.readFileSync("sub.txt","utf8");
+            const raw = fs.readFileSync("urls.txt","utf8");
 
             await github.rest.gists.update({
               gist_id: process.env.GID,
               files: {
-                "subscription_base64.txt": { content: base64 },
-                "subscription_urls.txt": { content: urls }
+                "subscription_base64.txt": { content: b64 },
+                "subscription_urls.txt": { content: raw }
               }
             });
         env:
           GID: ${{ secrets.GIST_ID }}
 
-      - name: Show Gist URL
+      - name: Show links
         run: |
-          echo "GIST 页面： https://gist.github.com/${{ github.actor }}/${{ secrets.GIST_ID }}"
-          echo "订阅（base64）： https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/subscription_base64.txt"
+          echo "Gist 页面： https://gist.github.com/${{ github.actor }}/${{ secrets.GIST_ID }}"
+          echo "Base64 订阅： https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/subscription_base64.txt"
           echo "URL 列表： https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/subscription_urls.txt"
