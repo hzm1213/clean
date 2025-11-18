@@ -1,74 +1,167 @@
-name: Convert JSON Subscription to Gist
+name: Convert JSON Subscription to Gist (multi-protocol)
 
 on:
   schedule:
-    - cron: "0 */6 * * *"  # 每6小时运行一次
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 jobs:
   update:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
+          sudo apt-get update -y
+          sudo apt-get install -y jq python3 python3-pip
+          pip3 install --no-cache-dir urllib3
 
       - name: Download subscription (from secret)
         run: |
-          curl -L "${{ secrets.SUB_URL }}" -o raw.json
-          echo "Downloaded raw.json:"
-          head -n 5 raw.json
+          curl -sL "${{ secrets.SUB_URL }}" -o raw.json
+          echo "Downloaded raw.json (first 30 lines):"
+          head -n 30 raw.json
 
-      - name: Extract VLESS nodes from JSON → URL
+      - name: Parse outbounds and build URLs (supports vless,trojan,vmess,ss)
         run: |
+          set -euo pipefail
           : > urls.txt
+
+          # helper to url-encode strings (uses python)
+          urlencode() {
+            python3 - <<PY - "$1"
+import sys,urllib.parse
+print(urllib.parse.quote(sys.argv[1], safe=''))
+PY
+"$1"
+          }
+
+          # iterate top-level array elements
           jq -c '.[]' raw.json | while read -r item; do
-            remarks=$(echo "$item" | jq -r '.remarks')
-            
-            outbound=$(echo "$item" | jq -c '.outbounds[] | select(.tag=="proxy")')
+            remarks=$(echo "$item" | jq -r '.remarks // empty')
+            # iterate outbounds with tag=="proxy"
+            echo "$item" | jq -c '.outbounds[]? | select(.tag=="proxy")' | while read -r outbound; do
+              proto=$(echo "$outbound" | jq -r '.protocol // empty')
+              server=$(echo "$outbound" | jq -r '.settings.address // empty')
+              port=$(echo "$outbound" | jq -r '.settings.port // empty')
+              # vless uuid or vmess id or trojan password or ss fields
+              uuid=$(echo "$outbound" | jq -r '.settings.id // empty')
+              # trojan password may be at settings.password or settings.secret
+              trojan_pass=$(echo "$outbound" | jq -r '.settings.password // .settings.pass // .settings.secret // empty')
+              # ss cipher/password
+              ss_method=$(echo "$outbound" | jq -r '.settings.method // empty')
+              ss_password=$(echo "$outbound" | jq -r '.settings.password // .settings.pass // empty')
+              # vmess may carry full config under settings
+              vmess_obj=$(echo "$outbound" | jq -c '.settings // empty')
+              network=$(echo "$outbound" | jq -r '.streamSettings.network // empty')
+              # ws settings
+              ws_host=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.host // empty')
+              ws_path=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.path // empty')
+              tls=$(echo "$outbound" | jq -r '.streamSettings.security // empty')
+              sni=$(echo "$outbound" | jq -r '.streamSettings.tlsSettings.serverName // empty')
+              # fallback defaults
+              [ -z "$server" ] && server=""
+              [ -z "$port" ] && port=""
+              # prepare remark encoded
+              if [ -n "$remarks" ]; then
+                remark_enc=$(urlencode "$remarks")
+              else
+                remark_enc=""
+              fi
 
-            proto=$(echo "$outbound" | jq -r '.protocol')
-            server=$(echo "$outbound" | jq -r '.settings.address')
-            port=$(echo "$outbound" | jq -r '.settings.port')
-            uuid=$(echo "$outbound" | jq -r '.settings.id')
+              case "$proto" in
+                vless)
+                  # build vless URL
+                  # ensure path begins with /
+                  if [ -n "$ws_path" ]; then
+                    path_enc=$(urlencode "$ws_path")
+                    # keep leading %2F if path starts with /
+                    # python encoder already encoded '/'
+                    # but we want %2F... so ok
+                  else
+                    path_enc="%2F"
+                  fi
 
-            network=$(echo "$outbound" | jq -r '.streamSettings.network')
+                  url="vless://${uuid}@${server}:${port}?type=${network:-tcp}&path=${path_enc}"
+                  [ -n "$ws_host" ] && url="${url}&host=$(urlencode "$ws_host")"
+                  [ "$tls" = "tls" ] && url="${url}&security=tls"
+                  [ -n "$sni" ] && url="${url}&sni=$(urlencode "$sni")"
+                  if [ -n "$remark_enc" ]; then
+                    url="${url}#${remark_enc}"
+                  fi
+                  echo "$url" >> urls.txt
+                  ;;
 
-            host=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.host // empty')
-            path=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.path // "/"')
-            tls=$(echo "$outbound" | jq -r '.streamSettings.security')
-            sni=$(echo "$outbound" | jq -r '.streamSettings.tlsSettings.serverName // empty')
+                trojan)
+                  # trojan://password@server:port?security=tls&sni=xxx#name
+                  url="trojan://${trojan_pass}@${server}:${port}"
+                  params=""
+                  [ "$tls" = "tls" ] && params="${params}security=tls"
+                  [ -n "$sni" ] && params="${params}${params:+&}sni=$(urlencode "$sni")"
+                  if [ -n "$params" ]; then
+                    url="${url}?${params}"
+                  fi
+                  [ -n "$remark_enc" ] && url="${url}#${remark_enc}"
+                  echo "$url" >> urls.txt
+                  ;;
 
-            url="vless://${uuid}@${server}:${port}?type=${network}&path=${path}"
+                vmess)
+                  # vmess uses base64(json)
+                  # try to build a JSON object like client expects; use original settings if possible
+                  # the vmess URI is vmess://base64(json)
+                  # We will use the `.settings` object and enrich streamSettings
+                  vmjson=$(echo "$outbound" | jq -c '{v: "2", ps: (env.REMARK // ""), add: (.settings.address // .settings.add // ""), port: (.settings.port|tostring // .settings.port // ""), id: (.settings.id // .settings.uuid // .settings.user // ""), aid: (.settings.aid // .settings.alterId // "0"), net: (.streamSettings.network // "tcp"), type: (.streamSettings.type // "none"), host: (.streamSettings.wsSettings.host // ""), path: (.streamSettings.wsSettings.path // ""), tls: (.streamSettings.security // "") }' --arg REMARK "$remarks")
+                  vmess_b64=$(echo -n "$vmjson" | base64 -w 0)
+                  echo "vmess://${vmess_b64}#${remark_enc}" >> urls.txt
+                  ;;
 
-            [ -n "$host" ] && url="${url}&host=${host}"
-            [ "$tls" = "tls" ] && url="${url}&security=tls"
-            [ -n "$sni" ] && url="${url}&sni=${sni}"
+                ss)
+                  # ss://base64(method:password)@host:port#name
+                  if [ -n "$ss_method" ] && [ -n "$ss_password" ]; then
+                    auth64=$(printf "%s:%s" "$ss_method" "$ss_password" | base64 -w 0)
+                    url="ss://${auth64}@${server}:${port}"
+                    [ -n "$remark_enc" ] && url="${url}#${remark_enc}"
+                    echo "$url" >> urls.txt
+                  fi
+                  ;;
 
-            echo "${url}#${remarks}" >> urls.txt
+                *)
+                  # unknown protocol -> attempt to output raw protocol and settings as comment
+                  echo "# Unsupported protocol: ${proto} (server=${server})" >> urls.txt
+                  ;;
+              esac
+
+            done
           done
+
+          echo "Built $(wc -l < urls.txt) URL lines."
+
+      - name: Sanitize urls (remove empty/lines only comments) and dedupe
+        run: |
+          # remove empty lines and comments, dedupe
+          grep -vE '^\s*$' urls.txt | grep -vE '^#' | awk '!seen[$0]++' > urls.cleaned.txt
+          mv urls.cleaned.txt urls.txt
+          echo "Final URL count: $(wc -l < urls.txt)"
 
       - name: Convert to Base64 subscription
         run: |
-          base64 urls.txt | tr -d '\n' > final.txt
+          base64 -w 0 urls.txt > final.txt
+          echo "Base64 subscription written to final.txt (length $(wc -c < final.txt) bytes)"
 
-      - name: Upload to Gist
+      - name: Upload to Gist (update)
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GIST_TOKEN }}
           script: |
             const fs = require('fs');
             const content = fs.readFileSync('final.txt', 'utf8');
-
             await github.rest.gists.update({
               gist_id: process.env.GIST_ID,
               files: {
-                "converted_base64.txt": { content: content }
+                "converted_base64.txt": { content: content },
+                "urls.txt": { content: fs.readFileSync('urls.txt','utf8') }
               }
             });
         env:
@@ -77,4 +170,5 @@ jobs:
       - name: Show Gist URL in Logs
         run: |
           echo "✅ Gist Page URL: https://gist.github.com/${{ github.actor }}/${{ secrets.GIST_ID }}"
-          echo "✅ Gist Raw URL: https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/converted_base64.txt"
+          echo "✅ Gist Raw (base64) URL: https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/converted_base64.txt"
+          echo "✅ Gist Raw (urls) URL: https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/urls.txt"
