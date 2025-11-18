@@ -1,8 +1,4 @@
-name: Convert JSON Subscription to Gist (preserve protocols)
-
-# optional: give workflow permission if you plan to use GITHUB_TOKEN for repo writes
-# permissions:
-#   contents: write
+name: Convert Subscription to Gist
 
 on:
   schedule:
@@ -10,177 +6,146 @@ on:
   workflow_dispatch:
 
 jobs:
-  convert_and_push:
+  run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install deps
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y python3 jq curl
+      - name: Install tools
+        run: sudo apt-get update -y && sudo apt-get install -y jq python3 curl
 
-      - name: Download subscription JSON
+      - name: Download Subscription JSON
         env:
           SUB_URL: ${{ secrets.SUB_URL }}
         run: |
-          set -e
-          echo "Downloading from SUB_URL..."
+          echo "Downloading JSON..."
           curl -fsSL "$SUB_URL" -o raw.json
-          echo "Preview (first 60 chars):"
+          echo "Downloaded first 200 chars:"
           head -c 200 raw.json || true
 
-      - name: Parse JSON and build urls.txt & urls.raw
+      - name: Convert JSON to URLs
         run: |
-          set -e
-          cat > build_urls.py <<'PY'
-import json, base64, urllib.parse, sys
+          cat > convert.py <<'EOF'
+import json, base64, urllib.parse
 
-def uenc(s):
-    return urllib.parse.quote(s or "")
-
-def make_vless(o, remarks):
-    host = o.get("settings",{}).get("address","")
-    port = o.get("settings",{}).get("port","")
-    uuid = o.get("settings",{}).get("id","")
-    net = o.get("streamSettings",{}).get("network","tcp")
-    ws = o.get("streamSettings",{}).get("wsSettings",{}) or {}
-    ws_host = ws.get("host","")
-    ws_path = ws.get("path","/")
-    tls = o.get("streamSettings",{}).get("security","")
-    sni = o.get("streamSettings",{}).get("tlsSettings",{}).get("serverName","")
-    q = f"type={net}&path={uenc(ws_path)}"
-    if ws_host:
-        q += f"&host={uenc(ws_host)}"
-    if tls=="tls":
-        q += "&security=tls"
-    if sni:
-        q += f"&sni={uenc(sni)}"
-    return f"vless://{uuid}@{host}:{port}?{q}#{uenc(remarks)}"
-
-def make_trojan(o, remarks):
-    host = o.get("settings",{}).get("address","")
-    port = o.get("settings",{}).get("port","")
-    pw = o.get("settings",{}).get("password","") or o.get("settings",{}).get("pass","")
-    tls = o.get("streamSettings",{}).get("security","")
-    sni = o.get("streamSettings",{}).get("tlsSettings",{}).get("serverName","")
-    url = f"trojan://{pw}@{host}:{port}"
-    params=[]
-    if tls=="tls":
-        params.append("security=tls")
-    if sni:
-        params.append(f"sni={uenc(sni)}")
-    if params:
-        url += "?" + "&".join(params)
-    return f"{url}#{uenc(remarks)}"
-
-def make_vmess(o, remarks):
-    host = o.get("settings",{}).get("address","")
-    port = o.get("settings",{}).get("port","")
-    vid = o.get("settings",{}).get("id","") or o.get("settings",{}).get("uuid","")
-    net = o.get("streamSettings",{}).get("network","tcp")
-    ws = o.get("streamSettings",{}).get("wsSettings",{}) or {}
-    ws_host = ws.get("host","")
-    ws_path = ws.get("path","/")
-    tls = o.get("streamSettings",{}).get("security","")
-    body = {
-        "v":"2",
-        "ps": remarks,
-        "add": host,
-        "port": str(port),
-        "id": vid,
-        "aid": "0",
-        "net": net,
-        "type": "none",
-        "host": ws_host,
-        "path": ws_path,
-        "tls": tls
-    }
-    raw = json.dumps(body, separators=(",",":"))
-    b64 = base64.b64encode(raw.encode()).decode()
-    return f"vmess://{b64}#{uenc(remarks)}"
-
-def make_ss(o, remarks):
-    host = o.get("settings",{}).get("address","")
-    port = o.get("settings",{}).get("port","")
-    method = o.get("settings",{}).get("method","")
-    passwd = o.get("settings",{}).get("password","")
-    if not method or not passwd:
-        return None
-    auth = base64.b64encode(f"{method}:{passwd}".encode()).decode()
-    return f"ss://{auth}@{host}:{port}#{uenc(remarks)}"
+def enc(x): return urllib.parse.quote(x or "")
 
 data = json.load(open("raw.json"))
-lines = []
+urls = []
+
 for item in data:
     remarks = item.get("remarks","")
-    for ob in item.get("outbounds", []):
-        # only process proxies
-        tag = ob.get("tag","")
-        if tag != "proxy":
+    for o in item.get("outbounds", []):
+        if o.get("tag") != "proxy":
             continue
-        proto = (ob.get("protocol") or "").lower()
-        try:
-            if proto == "vless":
-                lines.append(make_vless(ob, remarks))
-            elif proto == "trojan":
-                lines.append(make_trojan(ob, remarks))
-            elif proto == "vmess":
-                lines.append(make_vmess(ob, remarks))
-            elif proto == "ss":
-                s = make_ss(ob, remarks)
-                if s:
-                    lines.append(s)
-            else:
-                # fallback: dump a JSON-ish comment so you can inspect
-                lines.append(f"# unsupported:{proto} {uenc(remarks)}")
-        except Exception as e:
-            lines.append(f"# error processing {proto}: {uenc(remarks)}")
-# dedupe preserve order
+        proto = (o.get("protocol") or "").lower()
+
+        s = o.get("settings",{}) or {}
+        st = o.get("streamSettings",{}) or {}
+        ws = st.get("wsSettings",{}) or {}
+
+        host = s.get("address","")
+        port = s.get("port","")
+
+        # ----- VLESS -----
+        if proto == "vless":
+            uuid = s.get("id","")
+            net = st.get("network","tcp")
+            path = ws.get("path","/")
+            host_hdr = ws.get("host","")
+            tls = st.get("security","")
+            sni = st.get("tlsSettings",{}).get("serverName","")
+
+            q = f"type={net}&path={enc(path)}"
+            if host_hdr:
+                q += f"&host={enc(host_hdr)}"
+            if tls == "tls":
+                q += "&security=tls"
+            if sni:
+                q += f"&sni={enc(sni)}"
+
+            urls.append(f"vless://{uuid}@{host}:{port}?{q}#{enc(remarks)}")
+
+        # ----- TROJAN -----
+        elif proto == "trojan":
+            pwd = s.get("password","")
+            tls = st.get("security","")
+            sni = st.get("tlsSettings",{}).get("serverName","")
+
+            q = []
+            if tls == "tls":
+                q.append("security=tls")
+            if sni:
+                q.append(f"sni={enc(sni)}")
+            qp = "?" + "&".join(q) if q else ""
+
+            urls.append(f"trojan://{pwd}@{host}:{port}{qp}#{enc(remarks)}")
+
+        # ----- VMESS -----
+        elif proto == "vmess":
+            obj = {
+                "v": "2",
+                "ps": remarks,
+                "add": host,
+                "port": str(port),
+                "id": s.get("id",""),
+                "aid": "0",
+                "net": st.get("network","tcp"),
+                "type": "none",
+                "host": ws.get("host",""),
+                "path": ws.get("path","/"),
+                "tls": st.get("security","")
+            }
+            raw = json.dumps(obj, separators=(",",":"))
+            b64 = base64.b64encode(raw.encode()).decode()
+            urls.append(f"vmess://{b64}#{enc(remarks)}")
+
+        # ----- Shadowsocks -----
+        elif proto == "ss":
+            method = s.get("method","")
+            pwd = s.get("password","")
+            auth = base64.b64encode(f"{method}:{pwd}".encode()).decode()
+            urls.append(f"ss://{auth}@{host}:{port}#{enc(remarks)}")
+
+        else:
+            urls.append(f"# unsupported:{proto} {remarks}")
+
+# 去重保持顺序
 seen=set()
-out=[]
-for l in lines:
-    if l not in seen:
-        out.append(l); seen.add(l)
-open("urls.txt","w",encoding="utf8").write("\n".join(out))
-open("urls.raw","w",encoding="utf8").write("\n".join(out))
-print(f"built {len(out)} urls", file=sys.stderr)
-PY
-          python3 build_urls.py
-          echo "Preview (first 20 lines):"
+final=[]
+for u in urls:
+    if u not in seen:
+        final.append(u); seen.add(u)
+
+open("urls.txt","w").write("\n".join(final))
+EOF
+
+          python3 convert.py
+          echo "Generated:"
           head -n 20 urls.txt || true
 
-      - name: Build base64 subscription
-        run: |
-          base64 -w 0 urls.txt > sub_base64.txt
-          echo "base64 length: $(wc -c < sub_base64.txt)"
+      - name: Encode base64
+        run: base64 -w 0 urls.txt > sub_base64.txt
 
-      - name: Upload files to Gist via REST API
+      - name: Upload to Gist
         env:
-          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}   # classic PAT with gist scope
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
           GIST_ID: ${{ secrets.GIST_ID }}
         run: |
-          set -e
-          BODY=$(jq -n --rawfile sub sub_base64.txt --rawfile urls urls.txt \
-            '{files: { "subscription_base64.txt": { "content": $sub }, "subscription_urls.txt": { "content": $urls } } }')
-          # PATCH gist with token
-          resp=$(curl -sS -X PATCH \
+          BODY=$(jq -n \
+            --rawfile a urls.txt \
+            --rawfile b sub_base64.txt \
+            '{files: { "subscription_urls.txt": {content: $a}, "subscription_base64.txt": {content: $b} }}')
+
+          curl -sS -X PATCH \
             -H "Authorization: token $GIST_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
             -d "$BODY" \
-            "https://api.github.com/gists/$GIST_ID" || true)
-          echo "$resp" > gist_resp.json
-          # quick check for message field failure
-          if echo "$resp" | jq -e '.message' >/dev/null 2>&1; then
-            echo "Gist API response contains message -> failure"
-            echo "$resp" | jq -r '.message'
-            echo "Full response written to gist_resp.json"
-            exit 1
-          fi
-          echo "Gist updated successfully."
-          # print URLs
+            "https://api.github.com/gists/$GIST_ID"
+
+          echo "==== GIST UPDATED ===="
           echo "Gist Page: https://gist.github.com/${{ github.actor }}/${{ secrets.GIST_ID }}"
-          echo "Gist Raw (base64): https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/subscription_base64.txt"
-          echo "Gist Raw (urls)  : https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/subscription_urls.txt"
+          echo "Raw URLs:  https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/subscription_urls.txt"
+          echo "Base64:    https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/subscription_base64.txt"
