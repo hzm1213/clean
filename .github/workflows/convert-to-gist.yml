@@ -2,7 +2,7 @@ name: Convert JSON Subscription to Gist
 
 on:
   schedule:
-    - cron: "0 */6 * * *"  # 每6小时运行一次
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 jobs:
@@ -28,56 +28,57 @@ jobs:
         run: |
           : > urls.txt
           jq -c '.[]' raw.json | while read -r item; do
-            remarks=$(echo "$item" | jq -r '.remarks')
+            remarks=$(echo "$item" | jq -r '.remarks // "NoName"')
             outbound=$(echo "$item" | jq -c '.outbounds[] | select(.tag=="proxy")')
             proto=$(echo "$outbound" | jq -r '.protocol')
-            server=$(echo "$outbound" | jq -r '.settings.address')
-            port=$(echo "$outbound" | jq -r '.settings.port')
+
+            # 通用字段（分 vnext / servers）
+            server=$(echo "$outbound" | jq -r '.settings.vnext[0].address // .settings.servers[0].address // empty')
+            port=$(echo "$outbound" | jq -r '.settings.vnext[0].port // .settings.servers[0].port // empty')
+
+            # 空值直接跳过避免 null 节点
+            [ -z "$server" ] && echo "❌ Skip missing server: $remarks" && continue
+            [ -z "$port" ] && echo "❌ Skip missing port: $remarks" && continue
+
+            network=$(echo "$outbound" | jq -r '.streamSettings.network // "tcp"')
+            path=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.path // "/"')
+            host=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.host // empty')
+            tls=$(echo "$outbound" | jq -r '.streamSettings.security // ""')
+            sni=$(echo "$outbound" | jq -r '.streamSettings.tlsSettings.serverName // empty')
 
             case $proto in
               vless)
-                uuid=$(echo "$outbound" | jq -r '.settings.id')
-                network=$(echo "$outbound" | jq -r '.streamSettings.network')
-                path=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.path // "/"')
-                host=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.host // empty')
-                tls=$(echo "$outbound" | jq -r '.streamSettings.security')
-                sni=$(echo "$outbound" | jq -r '.streamSettings.tlsSettings.serverName // empty')
+                uuid=$(echo "$outbound" | jq -r '.settings.vnext[0].users[0].id // empty')
                 url="vless://${uuid}@${server}:${port}?type=${network}&path=${path}"
                 [ -n "$host" ] && url="${url}&host=${host}"
                 [ "$tls" = "tls" ] && url="${url}&security=tls"
                 [ -n "$sni" ] && url="${url}&sni=${sni}"
                 ;;
               vmess)
-                # vmess URL = base64(JSON)
                 vmess_json=$(echo "$outbound" | jq -c '{
                   v: "2",
-                  ps: '"\"$remarks\""',
-                  add: .settings.address,
-                  port: .settings.port,
-                  id: .settings.id,
-                  aid: .settings.alterId // 0,
-                  net: .streamSettings.network,
+                  ps: "'"$remarks"'",
+                  add: (.settings.vnext[0].address // ""),
+                  port: (.settings.vnext[0].port // ""),
+                  id: (.settings.vnext[0].users[0].id // ""),
+                  aid: (.settings.vnext[0].users[0].alterId // 0),
+                  net: (.streamSettings.network // ""),
                   type: "none",
                   host: (.streamSettings.wsSettings.host // ""),
                   path: (.streamSettings.wsSettings.path // "/"),
-                  tls: .streamSettings.security
+                  tls: (.streamSettings.security // "")
                 }')
                 url="vmess://$(echo -n "$vmess_json" | base64 -w0)"
                 ;;
               trojan)
-                password=$(echo "$outbound" | jq -r '.settings.password')
-                network=$(echo "$outbound" | jq -r '.streamSettings.network')
-                path=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.path // "/"')
-                host=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.host // empty')
-                tls=$(echo "$outbound" | jq -r '.streamSettings.security')
-                sni=$(echo "$outbound" | jq -r '.streamSettings.tlsSettings.serverName // empty')
+                password=$(echo "$outbound" | jq -r '.settings.servers[0].password // empty')
                 url="trojan://${password}@${server}:${port}?type=${network}&path=${path}"
                 [ -n "$host" ] && url="${url}&host=${host}"
                 [ "$tls" = "tls" ] && url="${url}&security=tls"
                 [ -n "$sni" ] && url="${url}&sni=${sni}"
                 ;;
               *)
-                echo "⚠️ 协议 $proto 暂不处理"
+                echo "⚠️ Unknown protocol $proto, skip"
                 continue
                 ;;
             esac
