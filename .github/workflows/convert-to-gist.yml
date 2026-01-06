@@ -1,4 +1,4 @@
-name: Mihomo JSON → Base64 + Universal Clash YAML
+name: Mihomo JSON → Base64 + Universal Clash YAML with BPB Names
 
 on:
   schedule:
@@ -23,15 +23,36 @@ jobs:
           jq '.proxies | length' raw.json
 
       #################################################
-      # 1️⃣ Convert proxies to Base64 subscription
+      # 1️⃣ Convert proxies to Base64 subscription with BPB names
       #################################################
       - name: Convert proxies to Base64 subscription
         run: |
           : > urls.txt
+          v_count=0
+          t_count=0
+          m_count=0
 
           jq -c '.proxies[]' raw.json | while read -r p; do
             type=$(echo "$p" | jq -r '.type')
-            name=$(echo "$p" | jq -r '.name' | sed 's/[^a-zA-Z0-9_-]/_/g')  # 避免 emoji
+
+            # 生成 BPB 节点名
+            case "$type" in
+              vless)
+                v_count=$((v_count+1))
+                name=$(printf "BPB-V%02d" "$v_count")
+                ;;
+              trojan)
+                t_count=$((t_count+1))
+                name=$(printf "BPB-T%02d" "$t_count")
+                ;;
+              vmess)
+                m_count=$((m_count+1))
+                name=$(printf "BPB-M%02d" "$m_count")
+                ;;
+              *)
+                continue
+                ;;
+            esac
 
             server=$(echo "$p" | jq -r '.server // empty')
             port=$(echo "$p" | jq -r '.port // empty')
@@ -47,7 +68,6 @@ jobs:
                 [ -z "$uuid" ] && continue
                 path=$(echo "$p" | jq -r '.["ws-opts"].path // "/"')
                 host=$(echo "$p" | jq -r '.["ws-opts"].headers.Host // empty')
-
                 url="vless://${uuid}@${server}:${port}?type=${network}&path=${path}"
                 [ -n "$host" ] && url="${url}&host=${host}"
                 [ -n "$sni" ] && url="${url}&sni=${sni}"
@@ -73,13 +93,9 @@ jobs:
                 [ -z "$password" ] && continue
                 path=$(echo "$p" | jq -r '.["ws-opts"].path // "/"')
                 host=$(echo "$p" | jq -r '.["ws-opts"].headers.Host // empty')
-
                 url="trojan://${password}@${server}:${port}?type=${network}&path=${path}"
                 [ -n "$host" ] && url="${url}&host=${host}"
                 [ -n "$sni" ] && url="${url}&sni=${sni}"
-                ;;
-              *)
-                continue
                 ;;
             esac
 
@@ -89,10 +105,13 @@ jobs:
           base64 urls.txt | tr -d '\n' > converted_base64.txt
 
       #################################################
-      # 2️⃣ Generate universal Clash YAML (all clients compatible)
+      # 2️⃣ Generate universal Clash YAML with BPB names
       #################################################
       - name: Generate universal Clash YAML
         run: |
+          v_count=0
+          t_count=0
+          m_count=0
           {
             echo "mixed-port: 7890"
             echo "socks-port: 7891"
@@ -117,8 +136,26 @@ jobs:
             echo ""
             echo "proxies:"
             jq -c '.proxies[]' raw.json | while read -r p; do
-              name=$(echo "$p" | jq -r '.name' | sed 's/[^a-zA-Z0-9_-]/_/g')
               type=$(echo "$p" | jq -r '.type')
+              # 生成 BPB 节点名
+              case "$type" in
+                vless)
+                  v_count=$((v_count+1))
+                  name=$(printf "BPB-V%02d" "$v_count")
+                  ;;
+                trojan)
+                  t_count=$((t_count+1))
+                  name=$(printf "BPB-T%02d" "$t_count")
+                  ;;
+                vmess)
+                  m_count=$((m_count+1))
+                  name=$(printf "BPB-M%02d" "$m_count")
+                  ;;
+                *)
+                  continue
+                  ;;
+              esac
+
               server=$(echo "$p" | jq -r '.server')
               port=$(echo "$p" | jq -r '.port')
 
@@ -166,8 +203,23 @@ jobs:
             echo "proxy-groups:"
             echo "  - name: Proxy"
             echo "    type: select"
-            echo "    proxies:"
-            jq -r '.proxies[].name' raw.json | sed 's/[^a-zA-Z0-9_-]/_/g' | sed 's/^/      - /'
+            # 输出节点名列表
+            jq -r '.proxies[].type' raw.json | while read -r t; do
+              case "$t" in
+                vless)
+                  v_count=$((v_count+1))
+                  echo "      - BPB-V$(printf "%02d" "$v_count")"
+                  ;;
+                trojan)
+                  t_count=$((t_count+1))
+                  echo "      - BPB-T$(printf "%02d" "$t_count")"
+                  ;;
+                vmess)
+                  m_count=$((m_count+1))
+                  echo "      - BPB-M$(printf "%02d" "$m_count")"
+                  ;;
+              esac
+            done
 
             echo ""
             echo "rules:"
@@ -199,5 +251,5 @@ jobs:
           echo "https://gist.github.com/${{ github.actor }}/${{ secrets.GIST_ID }}"
           echo "✅ Base64 Subscription:"
           echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/converted_base64.txt"
-          echo "✅ Universal Clash YAML (all clients compatible):"
+          echo "✅ Universal Clash YAML (BPB names, all clients compatible):"
           echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/clash_universal.yaml"
