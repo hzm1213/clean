@@ -1,4 +1,4 @@
-name: Mihomo JSON → Base64 + Universal Clash YAML with BPB Names
+name: Mihomo JSON → Base64 + Universal Clash YAML (BPB, Shadowrocket Compatible)
 
 on:
   schedule:
@@ -16,7 +16,7 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Download raw mihomo json
+      - name: Download raw mihomo JSON
         run: |
           curl -L "${{ secrets.SUB_URL }}" -o raw.json
           echo "Downloaded raw.json"
@@ -33,7 +33,8 @@ jobs:
           m_count=0
 
           jq -c '.proxies[]' raw.json | while read -r p; do
-            type=$(echo "$p" | jq -r '.type')
+            type=$(echo "$p" | jq -r '.type // empty')
+            [ -z "$type" ] && continue
 
             # 生成 BPB 节点名
             case "$type" in
@@ -58,7 +59,6 @@ jobs:
             port=$(echo "$p" | jq -r '.port // empty')
             network=$(echo "$p" | jq -r '.network // "tcp"')
             sni=$(echo "$p" | jq -r '.servername // empty')
-
             [ -z "$server" ] && continue
             [ -z "$port" ] && continue
 
@@ -136,7 +136,9 @@ jobs:
             echo ""
             echo "proxies:"
             jq -c '.proxies[]' raw.json | while read -r p; do
-              type=$(echo "$p" | jq -r '.type')
+              type=$(echo "$p" | jq -r '.type // empty')
+              [ -z "$type" ] && continue
+
               # 生成 BPB 节点名
               case "$type" in
                 vless)
@@ -156,36 +158,40 @@ jobs:
                   ;;
               esac
 
-              server=$(echo "$p" | jq -r '.server')
-              port=$(echo "$p" | jq -r '.port')
+              server=$(echo "$p" | jq -r '.server // empty')
+              port=$(echo "$p" | jq -r '.port // empty')
+              [ -z "$server" ] && continue
+              [ -z "$port" ] && continue
 
               echo "  - name: \"$name\""
               echo "    type: $type"
               echo "    server: $server"
               echo "    port: $port"
+              echo "    udp: true"
+              echo "    skip-cert-verify: true"
 
               if [ "$type" = "vless" ]; then
-                uuid=$(echo "$p" | jq -r '.uuid')
+                uuid=$(echo "$p" | jq -r '.uuid // empty')
                 [ -n "$uuid" ] && echo "    uuid: $uuid"
-                tls=$(echo "$p" | jq -r '.tls')
+                tls=$(echo "$p" | jq -r '.tls // false')
                 [ "$tls" = "true" ] && echo "    tls: true"
               elif [ "$type" = "vmess" ]; then
-                uuid=$(echo "$p" | jq -r '.uuid')
+                uuid=$(echo "$p" | jq -r '.uuid // empty')
                 [ -n "$uuid" ] && echo "    uuid: $uuid"
                 aid=$(echo "$p" | jq -r '.alterId // 0')
                 echo "    alterId: $aid"
                 cipher=$(echo "$p" | jq -r '.cipher // aes-128-gcm')
                 echo "    cipher: $cipher"
-                tls=$(echo "$p" | jq -r '.tls')
+                tls=$(echo "$p" | jq -r '.tls // false')
                 [ "$tls" = "true" ] && echo "    tls: true"
               elif [ "$type" = "trojan" ]; then
-                password=$(echo "$p" | jq -r '.password')
+                password=$(echo "$p" | jq -r '.password // empty')
                 [ -n "$password" ] && echo "    password: $password"
-                tls=$(echo "$p" | jq -r '.tls')
+                tls=$(echo "$p" | jq -r '.tls // false')
                 [ "$tls" = "true" ] && echo "    tls: true"
               fi
 
-              # WS support
+              # WS 支持
               ws_path=$(echo "$p" | jq -r '.["ws-opts"].path // empty')
               ws_host=$(echo "$p" | jq -r '.["ws-opts"].headers.Host // empty')
               if [ -n "$ws_path" ] || [ -n "$ws_host" ]; then
@@ -203,9 +209,9 @@ jobs:
             echo "proxy-groups:"
             echo "  - name: Proxy"
             echo "    type: select"
-            # 输出节点名列表
-            jq -r '.proxies[].type' raw.json | while read -r t; do
-              case "$t" in
+            jq -c '.proxies[]' raw.json | while read -r p; do
+              type=$(echo "$p" | jq -r '.type // empty')
+              case "$type" in
                 vless)
                   v_count=$((v_count+1))
                   echo "      - BPB-V$(printf "%02d" "$v_count")"
@@ -251,5 +257,5 @@ jobs:
           echo "https://gist.github.com/${{ github.actor }}/${{ secrets.GIST_ID }}"
           echo "✅ Base64 Subscription:"
           echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/converted_base64.txt"
-          echo "✅ Universal Clash YAML (BPB names, all clients compatible):"
+          echo "✅ Universal Clash YAML (BPB names, Shadowrocket Compatible):"
           echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/clash_universal.yaml"
