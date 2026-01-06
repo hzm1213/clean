@@ -1,267 +1,137 @@
-name: Mihomo JSON → Base64 + Universal Clash YAML (BPB, Full Compatible)
+name: Generate Universal Subscription
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: "0 */6 * * *"
-  workflow_dispatch:
 
 jobs:
-  update:
+  build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Download raw JSON
+      - name: Install tools
         run: |
-          curl -L "${{ secrets.SUB_URL }}" -o raw.json
-          echo "Downloaded raw.json, proxy count:"
-          jq '.proxies | length' raw.json
+          sudo apt-get update
+          sudo apt-get install -y jq curl
 
-      #####################################################################
-      # 1️⃣ Convert proxies to Base64 subscription with full standard
-      #####################################################################
-      - name: Convert proxies to Base64 subscription
+      - name: Download JSON subscription
         run: |
-          : > urls.txt
-          v_count=0
-          t_count=0
-          m_count=0
+          curl -L "${{ secrets.SUB_URL }}" -o nodes.json
 
-          jq -c '.proxies[]' raw.json | while read -r p; do
-            type=$(echo "$p" | jq -r '.type // empty')
-            [ -z "$type" ] && continue
+      - name: Generate Base64 and Clash YAML
+        shell: bash
+        run: |
+          set -euo pipefail
 
-            # BPB 命名规则
-            case "$type" in
-              vless)
-                v_count=$((v_count+1))
-                name=$(printf "BPB-V%02d" "$v_count")
-                ;;
-              trojan)
-                t_count=$((t_count+1))
-                name=$(printf "BPB-T%02d" "$t_count")
-                ;;
-              vmess)
-                m_count=$((m_count+1))
-                name=$(printf "BPB-M%02d" "$m_count")
-                ;;
-              *)
-                continue
-                ;;
-            esac
+          BASE64_OUT="sub_base64.txt"
+          CLASH_OUT="clash.yaml"
+          : > "$BASE64_OUT"
+          : > "$CLASH_OUT"
 
-            server=$(echo "$p" | jq -r '.server // empty')
-            port=$(echo "$p" | jq -r '.port // empty')
-            [ -z "$server" ] && continue
-            [ -z "$port" ] && continue
+          # Clash YAML header
+          cat <<EOF >> "$CLASH_OUT"
+port: 7890
+socks-port: 7891
+allow-lan: true
+mode: rule
+log-level: info
+proxies:
+EOF
 
-            network=$(echo "$p" | jq -r '.network // "tcp"')
-            path=$(echo "$p" | jq -r '.["ws-opts"].path // "/"')
-            host=$(echo "$p" | jq -r '.["ws-opts"].headers.Host // empty')
-            sni=$(echo "$p" | jq -r '.servername // empty')
-            tls=$(echo "$p" | jq -r '.tls // false')
+          v_index=1
+          t_index=1
+          m_index=1
 
-            case "$type" in
-              vless)
-                uuid=$(echo "$p" | jq -r '.uuid // empty')
-                [ -z "$uuid" ] && continue
-                url="vless://${uuid}@${server}:${port}?type=${network}&security=$( [ "$tls" = "true" ] && echo "tls" || echo "none" )&encryption=none&path=${path}"
-                [ -n "$host" ] && url="${url}&host=${host}"
-                [ -n "$sni" ] && url="${url}&sni=${sni}"
-                ;;
-              trojan)
-                password=$(echo "$p" | jq -r '.password // empty')
-                [ -z "$password" ] && continue
-                url="trojan://${password}@${server}:${port}?type=${network}&security=$( [ "$tls" = "true" ] && echo "tls" || echo "none" )&encryption=none&path=${path}"
-                [ -n "$host" ] && url="${url}&host=${host}"
-                [ -n "$sni" ] && url="${url}&sni=${sni}"
-                ;;
-              vmess)
-                uuid=$(echo "$p" | jq -r '.uuid // empty')
-                [ -z "$uuid" ] && continue
-                aid=$(echo "$p" | jq -r '.alterId // 0')
-                cipher=$(echo "$p" | jq -r '.cipher // auto')
-                url_json=$(jq -n \
-                  --arg ps "$name" \
-                  --arg add "$server" \
-                  --arg port "$port" \
-                  --arg id "$uuid" \
-                  --arg aid "$aid" \
-                  --arg net "$network" \
-                  --arg type "none" \
-                  --arg host "$host" \
-                  --arg path "$path" \
-                  --arg tls "$( [ "$tls" = "true" ] && echo "tls" || echo "" )" \
-                  --arg cipher "$cipher" \
-                  '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:$aid,net:$net,type:$type,host:$host,path:$path,tls:$tls,cipher:$cipher}')
-                url="vmess://$(echo -n "$url_json" | base64 -w0)"
-                ;;
-            esac
+          jq -c '.proxies[]' nodes.json | while read -r node; do
+            type=$(jq -r '.type // empty' <<< "$node")
+            server=$(jq -r '.server // empty' <<< "$node")
+            port=$(jq -r '.port // empty' <<< "$node")
+            [[ -z "$type" || -z "$server" || -z "$port" ]] && continue
 
-            echo "${url}#${name}" >> urls.txt
+            network=$(jq -r '.network // "tcp"' <<< "$node")
+            path=$(jq -r '.path // "/"' <<< "$node")
+            host=$(jq -r '.host // empty' <<< "$node")
+            sni=$(jq -r '.sni // empty' <<< "$node")
+            tls=$(jq -r '.tls // true' <<< "$node")  # 默认 TLS
+
+            if [[ "$type" == "vless" ]]; then
+              uuid=$(jq -r '.uuid // empty' <<< "$node")
+              [[ -z "$uuid" ]] && continue
+              name=$(printf "BPB-V%02d" "$v_index")
+              v_index=$((v_index+1))
+
+              # Base64 URL
+              echo "vless://${uuid}@${server}:${port}?type=${network}&security=tls&encryption=none&path=${path}&host=${host}&sni=${sni}#${name}" >> "$BASE64_OUT"
+
+              # Clash YAML
+              cat >> "$CLASH_OUT" <<EOF
+  - name: "${name}"
+    type: vless
+    server: ${server}
+    port: ${port}
+    uuid: ${uuid}
+    tls: true
+    skip-cert-verify: true
+    network: ${network}
+    ws-opts:
+      path: "${path}"
+      headers:
+        Host: ${host}
+    servername: ${sni}
+EOF
+
+            elif [[ "$type" == "trojan" ]]; then
+              password=$(jq -r '.password // empty' <<< "$node")
+              [[ -z "$password" ]] && continue
+              name=$(printf "BPB-T%02d" "$t_index")
+              t_index=$((t_index+1))
+
+              echo "trojan://${password}@${server}:${port}?type=${network}&security=tls&path=${path}&host=${host}&sni=${sni}#${name}" >> "$BASE64_OUT"
+
+              cat >> "$CLASH_OUT" <<EOF
+  - name: "${name}"
+    type: trojan
+    server: ${server}
+    port: ${port}
+    password: ${password}
+    tls: true
+    skip-cert-verify: true
+    network: ${network}
+    ws-opts:
+      path: "${path}"
+      headers:
+        Host: ${host}
+    servername: ${sni}
+EOF
+            fi
           done
 
-          base64 urls.txt | tr -d '\n' > converted_base64.txt
+          # Base64 encode for subscription
+          base64 -w 0 "$BASE64_OUT" > converted_base64.txt
 
-      #####################################################################
-      # 2️⃣ Generate universal Clash YAML
-      #####################################################################
-      - name: Generate universal Clash YAML
-        run: |
-          v_count=0
-          t_count=0
-          m_count=0
-          {
-            echo "mixed-port: 7890"
-            echo "socks-port: 7891"
-            echo "redir-port: 7892"
-            echo "allow-lan: true"
-            echo "mode: rule"
-            echo "log-level: info"
-            echo ""
-            echo "tun:"
-            echo "  enable: true"
-            echo "  stack: system"
-            echo "  auto-route: true"
-            echo ""
-            echo "dns:"
-            echo "  enable: true"
-            echo "  ipv6: false"
-            echo "  listen: 0.0.0.0:53"
-            echo ""
-            echo "sniffer:"
-            echo "  enable: true"
-            echo "  sniff: true"
-            echo ""
-            echo "proxies:"
-            jq -c '.proxies[]' raw.json | while read -r p; do
-              type=$(echo "$p" | jq -r '.type // empty')
-              [ -z "$type" ] && continue
-
-              case "$type" in
-                vless)
-                  v_count=$((v_count+1))
-                  name=$(printf "BPB-V%02d" "$v_count")
-                  ;;
-                trojan)
-                  t_count=$((t_count+1))
-                  name=$(printf "BPB-T%02d" "$t_count")
-                  ;;
-                vmess)
-                  m_count=$((m_count+1))
-                  name=$(printf "BPB-M%02d" "$m_count")
-                  ;;
-                *)
-                  continue
-                  ;;
-              esac
-
-              server=$(echo "$p" | jq -r '.server // empty')
-              port=$(echo "$p" | jq -r '.port // empty')
-              [ -z "$server" ] && continue
-              [ -z "$port" ] && continue
-
-              echo "  - name: \"$name\""
-              echo "    type: $type"
-              echo "    server: $server"
-              echo "    port: $port"
-              echo "    udp: true"
-              echo "    skip-cert-verify: true"
-
-              tls=$(echo "$p" | jq -r '.tls // false')
-              ws_path=$(echo "$p" | jq -r '.["ws-opts"].path // empty')
-              ws_host=$(echo "$p" | jq -r '.["ws-opts"].headers.Host // empty')
-
-              case "$type" in
-                vless)
-                  uuid=$(echo "$p" | jq -r '.uuid // empty')
-                  [ -n "$uuid" ] && echo "    uuid: $uuid"
-                  [ "$tls" = "true" ] && echo "    tls: true"
-                  echo "    encryption: none"
-                  ;;
-                vmess)
-                  uuid=$(echo "$p" | jq -r '.uuid // empty')
-                  [ -n "$uuid" ] && echo "    uuid: $uuid"
-                  aid=$(echo "$p" | jq -r '.alterId // 0')
-                  echo "    alterId: $aid"
-                  cipher=$(echo "$p" | jq -r '.cipher // auto')
-                  echo "    cipher: $cipher"
-                  [ "$tls" = "true" ] && echo "    tls: true"
-                  ;;
-                trojan)
-                  password=$(echo "$p" | jq -r '.password // empty')
-                  [ -n "$password" ] && echo "    password: $password"
-                  [ "$tls" = "true" ] && echo "    tls: true"
-                  echo "    encryption: none"
-                  ;;
-              esac
-
-              if [ -n "$ws_path" ] || [ -n "$ws_host" ]; then
-                echo "    network: ws"
-                echo "    ws-opts:"
-                [ -n "$ws_path" ] && echo "      path: \"$ws_path\""
-                if [ -n "$ws_host" ]; then
-                  echo "      headers:"
-                  echo "        Host: \"$ws_host\""
-                fi
-              fi
-            done
-
-            echo ""
-            echo "proxy-groups:"
-            echo "  - name: Proxy"
-            jq -c '.proxies[]' raw.json | while read -r p; do
-              type=$(echo "$p" | jq -r '.type // empty')
-              case "$type" in
-                vless)
-                  v_count=$((v_count+1))
-                  echo "      - BPB-V$(printf "%02d" "$v_count")"
-                  ;;
-                trojan)
-                  t_count=$((t_count+1))
-                  echo "      - BPB-T$(printf "%02d" "$t_count")"
-                  ;;
-                vmess)
-                  m_count=$((m_count+1))
-                  echo "      - BPB-M$(printf "%02d" "$m_count")"
-                  ;;
-              esac
-            done
-
-            echo ""
-            echo "rules:"
-            echo "  - MATCH,Proxy"
-          } > clash_universal.yaml
-
-      #####################################################################
-      # 3️⃣ Upload both files to the same Gist
-      #####################################################################
-      - name: Upload files to Gist
+      - name: Upload both files to Gist
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GIST_TOKEN }}
           script: |
-            const fs = require("fs");
+            const fs = require('fs');
             await github.rest.gists.update({
               gist_id: process.env.GIST_ID,
               files: {
-                "converted_base64.txt": { content: fs.readFileSync("converted_base64.txt", "utf8") },
-                "clash_universal.yaml": { content: fs.readFileSync("clash_universal.yaml", "utf8") }
+                "converted_base64.txt": { content: fs.readFileSync("converted_base64.txt","utf8") },
+                "clash_universal.yaml": { content: fs.readFileSync("clash.yaml","utf8") }
               }
             });
         env:
           GIST_ID: ${{ secrets.GIST_ID }}
 
-      - name: Show Gist URLs
+      - name: Show subscription URLs
         run: |
-          echo "✅ Gist Page:"
-          echo "https://gist.github.com/${{ github.actor }}/${{ secrets.GIST_ID }}"
-          echo "✅ Base64 Subscription:"
+          echo "✅ Base64 subscription URL:"
           echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/converted_base64.txt"
-          echo "✅ Universal Clash YAML:"
+          echo "✅ Clash YAML URL:"
           echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/clash_universal.yaml"
