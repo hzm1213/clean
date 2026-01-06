@@ -33,14 +33,7 @@ jobs:
           : > "$CLASH_OUT"
 
           # Clash YAML header
-          cat <<EOF > "$CLASH_OUT"
-port: 7890
-socks-port: 7891
-allow-lan: true
-mode: rule
-log-level: info
-proxies:
-EOF
+          printf "port: 7890\nsocks-port: 7891\nallow-lan: true\nmode: rule\nlog-level: info\nproxies:\n" >> "$CLASH_OUT"
 
           v_index=1
           t_index=1
@@ -68,21 +61,8 @@ EOF
               echo "vless://${uuid}@${server}:${port}?type=${network}&security=tls&encryption=none&path=${path}&host=${host}&sni=${sni}#${name}" >> "$BASE64_OUT"
 
               # Clash YAML
-              cat <<EOF2 >> "$CLASH_OUT"
-  - name: "${name}"
-    type: vless
-    server: ${server}
-    port: ${port}
-    uuid: ${uuid}
-    tls: true
-    skip-cert-verify: true
-    network: ${network}
-    ws-opts:
-      path: "${path}"
-      headers:
-        Host: ${host}
-    servername: ${sni}
-EOF2
+              printf "  - name: \"%s\"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n    tls: true\n    skip-cert-verify: true\n    network: %s\n    ws-opts:\n      path: \"%s\"\n      headers:\n        Host: %s\n    servername: %s\n" \
+              "$name" "$server" "$port" "$uuid" "$network" "$path" "$host" "$sni" >> "$CLASH_OUT"
 
             elif [[ "$type" == "trojan" ]]; then
               password=$(jq -r '.password // empty' <<< "$node")
@@ -94,21 +74,9 @@ EOF2
               echo "trojan://${password}@${server}:${port}?type=${network}&security=tls&path=${path}&host=${host}&sni=${sni}#${name}" >> "$BASE64_OUT"
 
               # Clash YAML
-              cat <<EOF2 >> "$CLASH_OUT"
-  - name: "${name}"
-    type: trojan
-    server: ${server}
-    port: ${port}
-    password: ${password}
-    tls: true
-    skip-cert-verify: true
-    network: ${network}
-    ws-opts:
-      path: "${path}"
-      headers:
-        Host: ${host}
-    servername: ${sni}
-EOF2
+              printf "  - name: \"%s\"\n    type: trojan\n    server: %s\n    port: %s\n    password: %s\n    tls: true\n    skip-cert-verify: true\n    network: %s\n    ws-opts:\n      path: \"%s\"\n      headers:\n        Host: %s\n    servername: %s\n" \
+              "$name" "$server" "$port" "$password" "$network" "$path" "$host" "$sni" >> "$CLASH_OUT"
+
             fi
           done
 
