@@ -1,4 +1,4 @@
-name: Generate Universal Subscription
+name: Universal Subscription Generator
 
 on:
   workflow_dispatch:
@@ -46,13 +46,14 @@ jobs:
             [[ -z "$type" || -z "$server" || -z "$port" ]] && continue
 
             network=$(jq -r '.network // "tcp"' <<< "$node")
-            path=$(jq -r '.path // "/"' <<< "$node")
-            host=$(jq -r '.host // empty' <<< "$node")
-            sni=$(jq -r '.sni // empty' <<< "$node")
+            path=$(jq -r '.["ws-opts"].path // "/"' <<< "$node")
+            host=$(jq -r '.["ws-opts"].headers.Host // .server' <<< "$node")
+            sni=$(jq -r '.servername // .server' <<< "$node")
             tls=$(jq -r '.tls // true' <<< "$node")
+            uuid=$(jq -r '.uuid // empty' <<< "$node")
+            password=$(jq -r '.password // empty' <<< "$node")
 
             if [[ "$type" == "vless" ]]; then
-              uuid=$(jq -r '.uuid // empty' <<< "$node")
               [[ -z "$uuid" ]] && continue
               name=$(printf "BPB-V%02d" "$v_index")
               v_index=$((v_index+1))
@@ -65,7 +66,6 @@ jobs:
               "$name" "$server" "$port" "$uuid" "$network" "$path" "$host" "$sni" >> "$CLASH_OUT"
 
             elif [[ "$type" == "trojan" ]]; then
-              password=$(jq -r '.password // empty' <<< "$node")
               [[ -z "$password" ]] && continue
               name=$(printf "BPB-T%02d" "$t_index")
               t_index=$((t_index+1))
