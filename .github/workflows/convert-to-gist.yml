@@ -1,4 +1,4 @@
-name: Mihomo JSON → Base64 Subscription + Standard Clash YAML
+name: Mihomo JSON → Base64 + Universal Clash YAML
 
 on:
   schedule:
@@ -23,7 +23,7 @@ jobs:
           jq '.proxies | length' raw.json
 
       #################################################
-      # 1️⃣ Proxies → URL → Base64 subscription
+      # 1️⃣ Convert proxies to Base64 subscription
       #################################################
       - name: Convert proxies to Base64 subscription
         run: |
@@ -31,7 +31,7 @@ jobs:
 
           jq -c '.proxies[]' raw.json | while read -r p; do
             type=$(echo "$p" | jq -r '.type')
-            name=$(echo "$p" | jq -r '.name')
+            name=$(echo "$p" | jq -r '.name' | sed 's/[^a-zA-Z0-9_-]/_/g')  # 避免 emoji
 
             server=$(echo "$p" | jq -r '.server // empty')
             port=$(echo "$p" | jq -r '.port // empty')
@@ -55,7 +55,7 @@ jobs:
               vmess)
                 vmess_json=$(echo "$p" | jq -c '{
                   v: "2",
-                  ps: .name,
+                  ps: "'"$name"'",
                   add: .server,
                   port: (.port | tostring),
                   id: .uuid,
@@ -89,64 +89,95 @@ jobs:
           base64 urls.txt | tr -d '\n' > converted_base64.txt
 
       #################################################
-      # 2️⃣ Generate standard Clash YAML
+      # 2️⃣ Generate universal Clash YAML (all clients compatible)
       #################################################
-      - name: Generate standard clash.yaml
+      - name: Generate universal Clash YAML
         run: |
           {
             echo "mixed-port: 7890"
+            echo "socks-port: 7891"
+            echo "redir-port: 7892"
             echo "allow-lan: true"
             echo "mode: rule"
             echo "log-level: info"
             echo ""
+            echo "tun:"
+            echo "  enable: true"
+            echo "  stack: system"
+            echo "  auto-route: true"
+            echo ""
+            echo "dns:"
+            echo "  enable: true"
+            echo "  ipv6: false"
+            echo "  listen: 0.0.0.0:53"
+            echo ""
+            echo "sniffer:"
+            echo "  enable: true"
+            echo "  sniff: true"
+            echo ""
             echo "proxies:"
             jq -c '.proxies[]' raw.json | while read -r p; do
-              echo "  - name: \"$(echo "$p" | jq -r '.name')\""
-              echo "    type: $(echo "$p" | jq -r '.type')"
-              echo "    server: $(echo "$p" | jq -r '.server')"
-              echo "    port: $(echo "$p" | jq -r '.port')"
+              name=$(echo "$p" | jq -r '.name' | sed 's/[^a-zA-Z0-9_-]/_/g')
+              type=$(echo "$p" | jq -r '.type')
+              server=$(echo "$p" | jq -r '.server')
+              port=$(echo "$p" | jq -r '.port')
 
-              for k in uuid password cipher udp tls sni servername alpn flow; do
-                v=$(echo "$p" | jq -r ".${k} // empty")
-                [ -n "$v" ] && echo "    ${k}: ${v}"
-              done
+              echo "  - name: \"$name\""
+              echo "    type: $type"
+              echo "    server: $server"
+              echo "    port: $port"
 
-              net=$(echo "$p" | jq -r '.network // empty')
-              [ -n "$net" ] && echo "    network: ${net}"
-
-              ws_path=$(echo "$p" | jq -r '.["ws-opts"].path // empty')
-              ws_host=$(echo "$p" | jq -r '.["ws-opts"].headers.Host // empty')
-
-              if [ -n "$ws_path" ] || [ -n "$ws_host" ]; then
-                echo "    ws-opts:"
-                [ -n "$ws_path" ] && echo "      path: \"${ws_path}\""
-                [ -n "$ws_host" ] && echo "      headers:"
-                [ -n "$ws_host" ] && echo "        Host: \"${ws_host}\""
+              if [ "$type" = "vless" ]; then
+                uuid=$(echo "$p" | jq -r '.uuid')
+                [ -n "$uuid" ] && echo "    uuid: $uuid"
+                tls=$(echo "$p" | jq -r '.tls')
+                [ "$tls" = "true" ] && echo "    tls: true"
+              elif [ "$type" = "vmess" ]; then
+                uuid=$(echo "$p" | jq -r '.uuid')
+                [ -n "$uuid" ] && echo "    uuid: $uuid"
+                aid=$(echo "$p" | jq -r '.alterId // 0')
+                echo "    alterId: $aid"
+                cipher=$(echo "$p" | jq -r '.cipher // aes-128-gcm')
+                echo "    cipher: $cipher"
+                tls=$(echo "$p" | jq -r '.tls')
+                [ "$tls" = "true" ] && echo "    tls: true"
+              elif [ "$type" = "trojan" ]; then
+                password=$(echo "$p" | jq -r '.password')
+                [ -n "$password" ] && echo "    password: $password"
+                tls=$(echo "$p" | jq -r '.tls')
+                [ "$tls" = "true" ] && echo "    tls: true"
               fi
 
-              grpc_service=$(echo "$p" | jq -r '.["grpc-opts"].["grpc-service-name"] // empty')
-              if [ -n "$grpc_service" ]; then
-                echo "    grpc-opts:"
-                echo "      grpc-service-name: \"${grpc_service}\""
+              # WS support
+              ws_path=$(echo "$p" | jq -r '.["ws-opts"].path // empty')
+              ws_host=$(echo "$p" | jq -r '.["ws-opts"].headers.Host // empty')
+              if [ -n "$ws_path" ] || [ -n "$ws_host" ]; then
+                echo "    network: ws"
+                echo "    ws-opts:"
+                [ -n "$ws_path" ] && echo "      path: \"$ws_path\""
+                if [ -n "$ws_host" ]; then
+                  echo "      headers:"
+                  echo "        Host: \"$ws_host\""
+                fi
               fi
             done
 
             echo ""
             echo "proxy-groups:"
-            echo "  - name: 🚀 Proxy"
+            echo "  - name: Proxy"
             echo "    type: select"
             echo "    proxies:"
-            jq -r '.proxies[].name' raw.json | sed 's/^/      - "/; s/$/"/'
+            jq -r '.proxies[].name' raw.json | sed 's/[^a-zA-Z0-9_-]/_/g' | sed 's/^/      - /'
 
             echo ""
             echo "rules:"
-            echo "  - MATCH,🚀 Proxy"
-          } > clash.yaml
+            echo "  - MATCH,Proxy"
+          } > clash_universal.yaml
 
       #################################################
-      # 3️⃣ Upload all files to the same Gist
+      # 3️⃣ Upload both files to the same Gist
       #################################################
-      - name: Upload Base64 & Clash YAML to Gist
+      - name: Upload files to Gist
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GIST_TOKEN }}
@@ -156,7 +187,7 @@ jobs:
               gist_id: process.env.GIST_ID,
               files: {
                 "converted_base64.txt": { content: fs.readFileSync("converted_base64.txt", "utf8") },
-                "clash.yaml": { content: fs.readFileSync("clash.yaml", "utf8") }
+                "clash_universal.yaml": { content: fs.readFileSync("clash_universal.yaml", "utf8") }
               }
             });
         env:
@@ -168,5 +199,5 @@ jobs:
           echo "https://gist.github.com/${{ github.actor }}/${{ secrets.GIST_ID }}"
           echo "✅ Base64 Subscription:"
           echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/converted_base64.txt"
-          echo "✅ Standard Clash YAML:"
-          echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/clash.yaml"
+          echo "✅ Universal Clash YAML (all clients compatible):"
+          echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/clash_universal.yaml"
