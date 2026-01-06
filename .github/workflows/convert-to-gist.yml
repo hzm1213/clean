@@ -27,8 +27,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          BASE64_OUT="sub_base64.txt"
-          CLASH_OUT="clash.yaml"
+          BASE64_OUT="converted_base64.txt"
+          CLASH_OUT="clash_universal.yaml"
           : > "$BASE64_OUT"
           : > "$CLASH_OUT"
 
@@ -44,8 +44,8 @@ EOF
 
           v_index=1
           t_index=1
-          m_index=1
 
+          # 遍历节点
           jq -c '.proxies[]' nodes.json | while read -r node; do
             type=$(jq -r '.type // empty' <<< "$node")
             server=$(jq -r '.server // empty' <<< "$node")
@@ -68,7 +68,7 @@ EOF
               echo "vless://${uuid}@${server}:${port}?type=${network}&security=tls&encryption=none&path=${path}&host=${host}&sni=${sni}#${name}" >> "$BASE64_OUT"
 
               # Clash YAML
-              cat >> "$CLASH_OUT" <<EOF
+              cat <<EOF2 >> "$CLASH_OUT"
   - name: "${name}"
     type: vless
     server: ${server}
@@ -82,7 +82,7 @@ EOF
       headers:
         Host: ${host}
     servername: ${sni}
-EOF
+EOF2
 
             elif [[ "$type" == "trojan" ]]; then
               password=$(jq -r '.password // empty' <<< "$node")
@@ -90,9 +90,11 @@ EOF
               name=$(printf "BPB-T%02d" "$t_index")
               t_index=$((t_index+1))
 
+              # Base64 URL
               echo "trojan://${password}@${server}:${port}?type=${network}&security=tls&path=${path}&host=${host}&sni=${sni}#${name}" >> "$BASE64_OUT"
 
-              cat >> "$CLASH_OUT" <<EOF
+              # Clash YAML
+              cat <<EOF2 >> "$CLASH_OUT"
   - name: "${name}"
     type: trojan
     server: ${server}
@@ -106,24 +108,23 @@ EOF
       headers:
         Host: ${host}
     servername: ${sni}
-EOF
+EOF2
             fi
           done
 
-          # Base64 encode for subscription
-          base64 -w 0 "$BASE64_OUT" > converted_base64.txt
-
-      - name: Upload both files to Gist
+      - name: Upload to Gist
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GIST_TOKEN }}
           script: |
             const fs = require('fs');
+            const content_base64 = fs.readFileSync("converted_base64.txt", "utf8");
+            const content_yaml = fs.readFileSync("clash_universal.yaml", "utf8");
             await github.rest.gists.update({
               gist_id: process.env.GIST_ID,
               files: {
-                "converted_base64.txt": { content: fs.readFileSync("converted_base64.txt","utf8") },
-                "clash_universal.yaml": { content: fs.readFileSync("clash.yaml","utf8") }
+                "converted_base64.txt": { content: content_base64 },
+                "clash_universal.yaml": { content: content_yaml }
               }
             });
         env:
@@ -131,7 +132,7 @@ EOF
 
       - name: Show subscription URLs
         run: |
-          echo "✅ Base64 subscription URL:"
+          echo "✅ Base64 URL:"
           echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/converted_base64.txt"
           echo "✅ Clash YAML URL:"
           echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/clash_universal.yaml"
