@@ -50,6 +50,7 @@ jobs:
             host=$(jq -r '.["ws-opts"].headers.Host // .server' <<< "$node")
             sni=$(jq -r '.servername // .server' <<< "$node")
             tls=$(jq -r '.tls // true' <<< "$node")
+            fp=$(jq -r '.["client-fingerprint"] // "chrome"' <<< "$node")
             uuid=$(jq -r '.uuid // empty' <<< "$node")
             password=$(jq -r '.password // empty' <<< "$node")
 
@@ -59,7 +60,7 @@ jobs:
               v_index=$((v_index+1))
 
               # Base64 URL
-              echo "vless://${uuid}@${server}:${port}?type=${network}&security=tls&encryption=none&path=${path}&host=${host}&sni=${sni}#${name}" >> "$BASE64_OUT"
+              echo "vless://${uuid}@${server}:${port}?type=${network}&security=tls&encryption=none&path=${path}&host=${host}&sni=${sni}&fp=${fp}&allowInsecure=1#${name}" >> "$BASE64_OUT"
 
               # Clash YAML
               printf "  - name: \"%s\"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n    tls: true\n    skip-cert-verify: true\n    network: %s\n    ws-opts:\n      path: \"%s\"\n      headers:\n        Host: %s\n    servername: %s\n" \
@@ -71,7 +72,7 @@ jobs:
               t_index=$((t_index+1))
 
               # Base64 URL
-              echo "trojan://${password}@${server}:${port}?type=${network}&security=tls&path=${path}&host=${host}&sni=${sni}#${name}" >> "$BASE64_OUT"
+              echo "trojan://${password}@${server}:${port}?type=${network}&security=tls&path=${path}&host=${host}&sni=${sni}&allowInsecure=1#${name}" >> "$BASE64_OUT"
 
               # Clash YAML
               printf "  - name: \"%s\"\n    type: trojan\n    server: %s\n    port: %s\n    password: %s\n    tls: true\n    skip-cert-verify: true\n    network: %s\n    ws-opts:\n      path: \"%s\"\n      headers:\n        Host: %s\n    servername: %s\n" \
