@@ -1,4 +1,4 @@
-name: Convert JSON Subscription to Base64 & Mihomo Clash
+name: Mihomo Config → Base64 Subscription & Gist
 
 on:
   schedule:
@@ -13,162 +13,94 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Install jq
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
 
-      - name: Download subscription (from secret)
+      - name: Download mihomo config (raw.json)
         run: |
           curl -L "${{ secrets.SUB_URL }}" -o raw.json
-          echo "Downloaded raw.json:"
-          head -n 5 raw.json
+          echo "Downloaded raw.json"
+          jq '.proxies | length' raw.json
 
       #################################################
-      # 1️⃣ JSON → URL → Base64（原有链路，保持不变）
+      # 1️⃣ mihomo proxies → URL → Base64
       #################################################
-      - name: Convert JSON to URL subscription
+      - name: Convert proxies to Base64 subscription
         run: |
           : > urls.txt
-          jq -c '.[]' raw.json | while read -r item; do
-            remarks=$(echo "$item" | jq -r '.remarks // "NoName"')
-            outbound=$(echo "$item" | jq -c '.outbounds[] | select(.tag=="proxy")')
-            proto=$(echo "$outbound" | jq -r '.protocol')
 
-            server=$(echo "$outbound" | jq -r '.settings.vnext[0].address // .settings.servers[0].address // empty')
-            port=$(echo "$outbound" | jq -r '.settings.vnext[0].port // .settings.servers[0].port // empty')
+          jq -c '.proxies[]' raw.json | while read -r p; do
+            type=$(echo "$p" | jq -r '.type')
+            name=$(echo "$p" | jq -r '.name')
+
+            server=$(echo "$p" | jq -r '.server // empty')
+            port=$(echo "$p" | jq -r '.port // empty')
+            network=$(echo "$p" | jq -r '.network // "tcp"')
+            sni=$(echo "$p" | jq -r '.servername // empty')
 
             [ -z "$server" ] && continue
             [ -z "$port" ] && continue
 
-            network=$(echo "$outbound" | jq -r '.streamSettings.network // "tcp"')
-            path=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.path // "/"')
-            host=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.host // empty')
-            tls=$(echo "$outbound" | jq -r '.streamSettings.security // ""')
-            sni=$(echo "$outbound" | jq -r '.streamSettings.tlsSettings.serverName // empty')
-
-            case $proto in
+            case "$type" in
               vless)
-                uuid=$(echo "$outbound" | jq -r '.settings.vnext[0].users[0].id // empty')
+                uuid=$(echo "$p" | jq -r '.uuid // empty')
+                [ -z "$uuid" ] && continue
+
+                path=$(echo "$p" | jq -r '.["ws-opts"].path // "/"')
+                host=$(echo "$p" | jq -r '.["ws-opts"].headers.Host // empty')
+
                 url="vless://${uuid}@${server}:${port}?type=${network}&path=${path}"
+                [ -n "$host" ] && url="${url}&host=${host}"
+                [ -n "$sni" ] && url="${url}&sni=${sni}"
                 ;;
               vmess)
-                vmess_json=$(echo "$outbound" | jq -c '{
-                  v:"2",
-                  ps:"'"$remarks"'",
-                  add:.settings.vnext[0].address,
-                  port:.settings.vnext[0].port,
-                  id:.settings.vnext[0].users[0].id,
-                  aid:(.settings.vnext[0].users[0].alterId // 0),
-                  net:.streamSettings.network,
-                  type:"none",
-                  host:(.streamSettings.wsSettings.host // ""),
-                  path:(.streamSettings.wsSettings.path // "/"),
-                  tls:.streamSettings.security
+                vmess_json=$(echo "$p" | jq -c '{
+                  v: "2",
+                  ps: .name,
+                  add: .server,
+                  port: (.port | tostring),
+                  id: .uuid,
+                  aid: (.alterId // 0),
+                  net: .network,
+                  type: "none",
+                  host: (.["ws-opts"].headers.Host // ""),
+                  path: (.["ws-opts"].path // "/"),
+                  tls: (if .tls then "tls" else "" end)
                 }')
                 url="vmess://$(echo -n "$vmess_json" | base64 -w0)"
                 ;;
               trojan)
-                password=$(echo "$outbound" | jq -r '.settings.servers[0].password // empty')
+                password=$(echo "$p" | jq -r '.password // empty')
+                [ -z "$password" ] && continue
+
+                path=$(echo "$p" | jq -r '.["ws-opts"].path // "/"')
+                host=$(echo "$p" | jq -r '.["ws-opts"].headers.Host // empty')
+
                 url="trojan://${password}@${server}:${port}?type=${network}&path=${path}"
+                [ -n "$host" ] && url="${url}&host=${host}"
+                [ -n "$sni" ] && url="${url}&sni=${sni}"
                 ;;
               *)
                 continue
                 ;;
             esac
 
-            [ -n "$host" ] && url="${url}&host=${host}"
-            [ "$tls" = "tls" ] && url="${url}&security=tls"
-            [ -n "$sni" ] && url="${url}&sni=${sni}"
-
-            echo "${url}#${remarks}" >> urls.txt
+            echo "${url}#${name}" >> urls.txt
           done
 
-      - name: Convert URL list to Base64
-        run: |
           base64 urls.txt | tr -d '\n' > converted_base64.txt
 
       #################################################
-      # 2️⃣ JSON → Mihomo Clash YAML（全新独立链路）
+      # 2️⃣ 同一 Gist，多文件上传
       #################################################
-      - name: Convert JSON to Mihomo Clash YAML
-        run: |
-          echo "proxies:" > clash.yaml
-
-          jq -c '.[]' raw.json | while read -r item; do
-            remarks=$(echo "$item" | jq -r '.remarks // "NoName"')
-            outbound=$(echo "$item" | jq -c '.outbounds[] | select(.tag=="proxy")')
-            proto=$(echo "$outbound" | jq -r '.protocol')
-
-            server=$(echo "$outbound" | jq -r '.settings.vnext[0].address // .settings.servers[0].address // empty')
-            port=$(echo "$outbound" | jq -r '.settings.vnext[0].port // .settings.servers[0].port // empty')
-
-            [ -z "$server" ] && continue
-            [ -z "$port" ] && continue
-
-            network=$(echo "$outbound" | jq -r '.streamSettings.network // "tcp"')
-            path=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.path // "/"')
-            host=$(echo "$outbound" | jq -r '.streamSettings.wsSettings.host // empty')
-            tls=$(echo "$outbound" | jq -r '.streamSettings.security // ""')
-            sni=$(echo "$outbound" | jq -r '.streamSettings.tlsSettings.serverName // empty')
-
-            echo "  - name: \"${remarks}\"" >> clash.yaml
-            echo "    type: ${proto}" >> clash.yaml
-            echo "    server: ${server}" >> clash.yaml
-            echo "    port: ${port}" >> clash.yaml
-            echo "    network: ${network}" >> clash.yaml
-            echo "    udp: true" >> clash.yaml
-
-            case "$proto" in
-              vless)
-                uuid=$(echo "$outbound" | jq -r '.settings.vnext[0].users[0].id // empty')
-                [ -z "$uuid" ] && continue
-                echo "    uuid: ${uuid}" >> clash.yaml
-                ;;
-              vmess)
-                uuid=$(echo "$outbound" | jq -r '.settings.vnext[0].users[0].id // empty')
-                aid=$(echo "$outbound" | jq -r '.settings.vnext[0].users[0].alterId // 0')
-                echo "    uuid: ${uuid}" >> clash.yaml
-                echo "    alterId: ${aid}" >> clash.yaml
-                echo "    cipher: auto" >> clash.yaml
-                ;;
-              trojan)
-                password=$(echo "$outbound" | jq -r '.settings.servers[0].password // empty')
-                [ -z "$password" ] && continue
-                echo "    password: ${password}" >> clash.yaml
-                ;;
-              *)
-                continue
-                ;;
-            esac
-
-            if [ "$network" = "ws" ]; then
-              echo "    ws-opts:" >> clash.yaml
-              echo "      path: ${path}" >> clash.yaml
-              [ -n "$host" ] && {
-                echo "      headers:" >> clash.yaml
-                echo "        Host: ${host}" >> clash.yaml
-              }
-            fi
-
-            if [ "$tls" = "tls" ]; then
-              echo "    tls: true" >> clash.yaml
-              echo "    skip-cert-verify: false" >> clash.yaml
-              [ -n "$sni" ] && echo "    servername: ${sni}" >> clash.yaml
-            else
-              echo "    tls: false" >> clash.yaml
-            fi
-          done
-
-      #################################################
-      # 3️⃣ 同一 Gist，多文件上传
-      #################################################
-      - name: Upload Base64 & Clash YAML to Gist
+      - name: Upload Base64 & Mihomo config to Gist
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GIST_TOKEN }}
           script: |
-            const fs = require('fs');
+            const fs = require("fs");
 
             await github.rest.gists.update({
               gist_id: process.env.GIST_ID,
@@ -176,8 +108,8 @@ jobs:
                 "converted_base64.txt": {
                   content: fs.readFileSync("converted_base64.txt", "utf8")
                 },
-                "clash.yaml": {
-                  content: fs.readFileSync("clash.yaml", "utf8")
+                "mihomo.yaml": {
+                  content: fs.readFileSync("raw.json", "utf8")
                 }
               }
             });
@@ -186,6 +118,11 @@ jobs:
 
       - name: Show Gist URLs
         run: |
-          echo "✅ Gist Page: https://gist.github.com/${{ github.actor }}/${{ secrets.GIST_ID }}"
-          echo "✅ Base64:    https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/converted_base64.txt"
-          echo "✅ Clash:     https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/clash.yaml"
+          echo "✅ Gist Page:"
+          echo "https://gist.github.com/${{ github.actor }}/${{ secrets.GIST_ID }}"
+          echo
+          echo "✅ Base64 Subscription:"
+          echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/converted_base64.txt"
+          echo
+          echo "✅ Mihomo Config:"
+          echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/mihomo.yaml"
