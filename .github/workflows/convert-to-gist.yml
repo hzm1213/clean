@@ -1,4 +1,4 @@
-name: Mihomo JSON → Standard Clash YAML
+name: Mihomo Config → Base64 Subscription & Gist
 
 on:
   schedule:
@@ -6,94 +6,123 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  update:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Download raw mihomo json
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Download mihomo config (raw.json)
         run: |
           curl -L "${{ secrets.SUB_URL }}" -o raw.json
+          echo "Downloaded raw.json"
           jq '.proxies | length' raw.json
 
       #################################################
-      # 1️⃣ 生成标准 Clash YAML
+      # 1️⃣ mihomo proxies → URL → Base64
       #################################################
-      - name: Generate standard clash.yaml
+      - name: Convert proxies to Base64 subscription
         run: |
-          {
-            echo "mixed-port: 7890"
-            echo "allow-lan: true"
-            echo "mode: rule"
-            echo "log-level: info"
-            echo ""
-            echo "proxies:"
-            jq -c '.proxies[]' raw.json | while read -r p; do
-              echo "  - name: \"$(echo "$p" | jq -r '.name')\""
-              echo "    type: $(echo "$p" | jq -r '.type')"
-              echo "    server: $(echo "$p" | jq -r '.server')"
-              echo "    port: $(echo "$p" | jq -r '.port')"
+          : > urls.txt
 
-              for k in uuid password cipher udp tls sni servername alpn flow; do
-                v=$(echo "$p" | jq -r ".${k} // empty")
-                [ -n "$v" ] && echo "    ${k}: ${v}"
-              done
+          jq -c '.proxies[]' raw.json | while read -r p; do
+            type=$(echo "$p" | jq -r '.type')
+            name=$(echo "$p" | jq -r '.name')
 
-              net=$(echo "$p" | jq -r '.network // empty')
-              [ -n "$net" ] && echo "    network: ${net}"
+            server=$(echo "$p" | jq -r '.server // empty')
+            port=$(echo "$p" | jq -r '.port // empty')
+            network=$(echo "$p" | jq -r '.network // "tcp"')
+            sni=$(echo "$p" | jq -r '.servername // empty')
 
-              ws_path=$(echo "$p" | jq -r '.["ws-opts"].path // empty')
-              ws_host=$(echo "$p" | jq -r '.["ws-opts"].headers.Host // empty')
+            [ -z "$server" ] && continue
+            [ -z "$port" ] && continue
 
-              if [ -n "$ws_path" ] || [ -n "$ws_host" ]; then
-                echo "    ws-opts:"
-                [ -n "$ws_path" ] && echo "      path: \"${ws_path}\""
-                [ -n "$ws_host" ] && echo "      headers:"
-                [ -n "$ws_host" ] && echo "        Host: \"${ws_host}\""
-              fi
+            case "$type" in
+              vless)
+                uuid=$(echo "$p" | jq -r '.uuid // empty')
+                [ -z "$uuid" ] && continue
 
-              grpc_service=$(echo "$p" | jq -r '.["grpc-opts"].["grpc-service-name"] // empty')
-              if [ -n "$grpc_service" ]; then
-                echo "    grpc-opts:"
-                echo "      grpc-service-name: \"${grpc_service}\""
-              fi
-            done
+                path=$(echo "$p" | jq -r '.["ws-opts"].path // "/"')
+                host=$(echo "$p" | jq -r '.["ws-opts"].headers.Host // empty')
 
-            echo ""
-            echo "proxy-groups:"
-            echo "  - name: 🚀 Proxy"
-            echo "    type: select"
-            echo "    proxies:"
-            jq -r '.proxies[].name' raw.json | sed 's/^/      - "/; s/$/"/'
+                url="vless://${uuid}@${server}:${port}?type=${network}&path=${path}"
+                [ -n "$host" ] && url="${url}&host=${host}"
+                [ -n "$sni" ] && url="${url}&sni=${sni}"
+                ;;
+              vmess)
+                vmess_json=$(echo "$p" | jq -c '{
+                  v: "2",
+                  ps: .name,
+                  add: .server,
+                  port: (.port | tostring),
+                  id: .uuid,
+                  aid: (.alterId // 0),
+                  net: .network,
+                  type: "none",
+                  host: (.["ws-opts"].headers.Host // ""),
+                  path: (.["ws-opts"].path // "/"),
+                  tls: (if .tls then "tls" else "" end)
+                }')
+                url="vmess://$(echo -n "$vmess_json" | base64 -w0)"
+                ;;
+              trojan)
+                password=$(echo "$p" | jq -r '.password // empty')
+                [ -z "$password" ] && continue
 
-            echo ""
-            echo "rules:"
-            echo "  - MATCH,🚀 Proxy"
-          } > clash.yaml
+                path=$(echo "$p" | jq -r '.["ws-opts"].path // "/"')
+                host=$(echo "$p" | jq -r '.["ws-opts"].headers.Host // empty')
+
+                url="trojan://${password}@${server}:${port}?type=${network}&path=${path}"
+                [ -n "$host" ] && url="${url}&host=${host}"
+                [ -n "$sni" ] && url="${url}&sni=${sni}"
+                ;;
+              *)
+                continue
+                ;;
+            esac
+
+            echo "${url}#${name}" >> urls.txt
+          done
+
+          base64 urls.txt | tr -d '\n' > converted_base64.txt
 
       #################################################
-      # 2️⃣ 上传到同一 Gist
+      # 2️⃣ 同一 Gist，多文件上传
       #################################################
-      - name: Upload clash.yaml to Gist
+      - name: Upload Base64 & Mihomo config to Gist
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GIST_TOKEN }}
           script: |
             const fs = require("fs");
+
             await github.rest.gists.update({
               gist_id: process.env.GIST_ID,
               files: {
-                "clash.yaml": {
-                  content: fs.readFileSync("clash.yaml", "utf8")
+                "converted_base64.txt": {
+                  content: fs.readFileSync("converted_base64.txt", "utf8")
+                },
+                "mihomo.yaml": {
+                  content: fs.readFileSync("raw.json", "utf8")
                 }
               }
             });
         env:
           GIST_ID: ${{ secrets.GIST_ID }}
 
-      - name: Output
+      - name: Show Gist URLs
         run: |
-          echo "✅ Standard Clash YAML:"
-          echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/clash.yaml"
+          echo "✅ Gist Page:"
+          echo "https://gist.github.com/${{ github.actor }}/${{ secrets.GIST_ID }}"
+          echo
+          echo "✅ Base64 Subscription:"
+          echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/converted_base64.txt"
+          echo
+          echo "✅ Mihomo Config:"
+          echo "https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/mihomo.yaml"
